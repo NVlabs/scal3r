@@ -37,11 +37,11 @@ Official implementation of <strong>Continuous 3D Perception Model with Persisten
 - [Evaluation](#evaluation)
   - [Datasets](#datasets-1)
   - [Evaluation Scripts](#evaluation-scripts)
-- [Citation](#citation)
 - [Acknowledgements](#acknowledgements)
+- [Citation](#citation)
 
 ## TODO
-- [ ] Release multi-view stereo results of DL3DV dataset.
+- [x] Release multi-view stereo results of DL3DV dataset.
 - [ ] Online demo integrated with WebCam
 
 ## Getting Started
@@ -82,7 +82,7 @@ We currently provide checkpoints on Google Drive:
 
 | Modelname   | Training resolutions | #Views| Head |
 |-------------|----------------------|-------|------|
-| [`cut3r_224_linear_4.pth`](https://drive.google.com/file/d/11dAgFkWHpaOHsR6iuitlB_v4NFFBrWjy/view?usp=drive_link) | 224x224 | 4 | Linear |
+| [`cut3r_224_linear_4.pth`](https://drive.google.com/file/d/11dAgFkWHpaOHsR6iuitlB_v4NFFBrWjy/view?usp=drive_link) | 224x224 | 16 | Linear |
 | [`cut3r_512_dpt_4_64.pth`](https://drive.google.com/file/d/1Asz-ZB3FfpzZYwunhQvNPZEUA8XUNAYD/view?usp=drive_link) | 512x384, 512x336, 512x288, 512x256, 512x160, 384x512, 336x512, 288x512, 256x512, 160x512 | 4-64 | DPT |
 
 > `cut3r_224_linear_4.pth` is our intermediate checkpoint and `cut3r_512_dpt_4_64.pth` is our final checkpoint.

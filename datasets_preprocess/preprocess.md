@@ -1,6 +1,6 @@
 # Preprocess Scripts
 
-Please download all datasets from their <strong>original sources</strong>, except for vKITTI, for which we provide a fully processed version—no need to download the original dataset. For MapFree, we also release depth maps computed using COLMAP Multi-View Stereo (MVS). See the sections below for details on the processing of each dataset. <strong>Please ensure compliance with the respective licensing agreements when downloading.</strong> The total data takes about 25TB of disk space.
+Please download all datasets from their <strong>original sources</strong>, except for vKITTI, for which we provide a fully processed version—no need to download the original dataset. For MapFree and DL3DV, we also release depth maps computed using COLMAP Multi-View Stereo (MVS). See the sections below for details on the processing of each dataset. <strong>Please ensure compliance with the respective licensing agreements when downloading.</strong> The total data takes about 25TB of disk space.
 
 > If you encounter issues in the scripts, please feel free to create an issue.
 
@@ -431,13 +431,16 @@ python3 preprocess_cop3d.py --cop3d_dir /path/to/cop3d \
 </div>
 
 
-Due to current potential problems with license, you may need to run multi-view stereo on DL3DV by yourself (which is extremely time consuming). If this is done, then you can use our preprocess script:
+~~Due to current potential problems with license, you may need to run multi-view stereo on DL3DV by yourself (which is extremely time consuming). If this is done, then you can use our preprocess script:~~
 
 ```
 python3 preprocess_dl3dv.py --dl3dv_dir /path/to/dl3dv \
        --output_dir /path/to/processed_dl3dv
 ```
-
+Then, download our released [depths and masks](https://drive.google.com/file/d/14E15EG5NJgWH5UVYubrPSSFXmReCIe7f/view?usp=drive_link) and combine it with your `/path/to/processed_dl3dv`.
+```
+python3 merge_dl3dv.py # remember to change necessary paths
+```
 
 ## [Dynamic Replica](https://github.com/facebookresearch/dynamic_stereo)
 <div>

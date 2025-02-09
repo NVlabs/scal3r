@@ -66,11 +66,11 @@ def main(rootdir, outdir):
         for subseq in subseqs:
             sparse_dir = osp.join(rootdir, env, subseq, "sparse")
             images_dir = osp.join(rootdir, env, subseq, "images")
-            depth_dir = osp.join(rootdir, env, subseq, "stereo", "depth_maps")
+            # depth_dir = osp.join(rootdir, env, subseq, "stereo", "depth_maps")
             if (
                 (not os.path.exists(sparse_dir))
                 or (not os.path.exists(images_dir))
-                or (not os.path.exists(depth_dir))
+                # or (not os.path.exists(depth_dir))
             ):
                 continue
             intrins_file = sparse_dir + "/cameras.txt"
@@ -140,7 +140,7 @@ def main(rootdir, outdir):
 
             os.makedirs(osp.join(outdir, env, subseq), exist_ok=True)
             os.makedirs(osp.join(outdir, env, subseq, "rgb"), exist_ok=True)
-            os.makedirs(osp.join(outdir, env, subseq, "depth"), exist_ok=True)
+            # os.makedirs(osp.join(outdir, env, subseq, "depth"), exist_ok=True)
             os.makedirs(osp.join(outdir, env, subseq, "cam"), exist_ok=True)
 
             for i, img_name in enumerate(tqdm(images)):
@@ -153,12 +153,12 @@ def main(rootdir, outdir):
                     print("Exist!")
                     continue
                 img_path = os.path.join(images_dir, img_name)
-                depth_path = os.path.join(depth_dir, img_name + ".geometric.bin")
+                # depth_path = os.path.join(depth_dir, img_name + ".geometric.bin")
                 if not os.path.exists(depth_path) or not os.path.exists(img_path):
                     continue
                 try:
                     rgb = Image.open(img_path)
-                    depth = read_array(depth_path)
+                    # depth = read_array(depth_path)
                 except:
                     continue
                 intrinsic = intrinsics[i]
@@ -167,12 +167,12 @@ def main(rootdir, outdir):
                 # save all
 
                 rgb.save(osp.join(outdir, env, subseq, "rgb", basename))
-                np.save(
-                    osp.join(
-                        outdir, env, subseq, "depth", basename.replace(".png", ".npy")
-                    ),
-                    depth,
-                )
+                # np.save(
+                #     osp.join(
+                #         outdir, env, subseq, "depth", basename.replace(".png", ".npy")
+                #     ),
+                #     depth,
+                # )
                 np.savez(
                     osp.join(
                         outdir, env, subseq, "cam", basename.replace(".png", ".npz")
