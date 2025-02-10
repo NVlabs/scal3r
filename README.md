@@ -69,7 +69,7 @@ pip install evo
 pip install open3d
 ```
 
-3. Optional, compile the cuda kernels for RoPE (as in CroCo v2).
+3. Compile the cuda kernels for RoPE (as in CroCo v2).
 ```bash
 cd src/croco/models/curope/
 python setup.py build_ext --inplace
