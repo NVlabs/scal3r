@@ -36,7 +36,7 @@ class EasyDataset:
         pass  # nothing to do by default
 
     def make_sampler(
-        self, batch_size, shuffle=True, drop_last=True, world_size=1, rank=0
+        self, batch_size, shuffle=True, drop_last=True, world_size=1, rank=0, fixed_length=False
     ):
         if not (shuffle):
             raise NotImplementedError()  # cannot deal yet
@@ -46,7 +46,7 @@ class EasyDataset:
             self,
             batch_size,
             num_of_aspect_ratios,
-            4,
+            4 if not fixed_length else num_of_views,
             num_of_views,
             world_size,
             warmup=1,

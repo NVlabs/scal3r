@@ -172,6 +172,23 @@ data/
 ### Evaluation Scripts
 Please refer to the [eval.md](eval/eval.md) for more details.
 
+## Finetuning
+
+
+
+```
+# Remember to replace the dataset path to your own path
+# the script has been tested on a 8xA100(80G) machine
+
+cd src
+
+# finetune 224 checkpoint
+CUDA_LAUNCH_BLOCKING=1 NCCL_DEBUG=TRACE TORCH_DISTRIBUTED_DEBUG=DETAIL HYDRA_FULL_ERROR=1 accelerate launch --multi_gpu train.py  --config-name dpt_512_vary_4_64
+
+# finetune 512 checkpoint
+CUDA_LAUNCH_BLOCKING=1 NCCL_DEBUG=TRACE TORCH_DISTRIBUTED_DEBUG=DETAIL HYDRA_FULL_ERROR=1 accelerate launch --multi_gpu train.py  --config-name linear_224_fixed_16
+```
+
 ## Acknowledgements
 Our code is based on the following awesome repositories:
 

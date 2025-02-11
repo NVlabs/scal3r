@@ -45,6 +45,7 @@ def get_data_loader(
     drop_last=True,
     pin_mem=True,
     accelerator: Accelerator = None,
+    fixed_length=False,
 ):
     import torch
 
@@ -58,6 +59,7 @@ def get_data_loader(
             shuffle=shuffle,
             drop_last=drop_last,
             world_size=accelerator.num_processes,
+            fixed_length=fixed_length
         )
         shuffle = False
 

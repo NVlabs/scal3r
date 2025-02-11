@@ -154,6 +154,7 @@ def train(args):
         args.num_workers,
         accelerator=accelerator,
         test=False,
+        fixed_length=args.fixed_length
     )
     printer.info("Building test dataset %s", args.test_dataset)
     data_loader_test = {
@@ -163,6 +164,7 @@ def train(args):
             args.num_workers,
             accelerator=accelerator,
             test=True,
+            fixed_length=True
         )
         for dataset in args.test_dataset.split("+")
     }
@@ -347,7 +349,7 @@ def save_final_model(accelerator, args, epoch, model_without_ddp, best_so_far=No
     misc.save_on_master(accelerator, to_save, checkpoint_path)
 
 
-def build_dataset(dataset, batch_size, num_workers, accelerator, test=False):
+def build_dataset(dataset, batch_size, num_workers, accelerator, test=False, fixed_length=False):
     split = ["Train", "Test"][test]
     printer.info(f"Building {split} Data loader for dataset: {dataset}")
     loader = get_data_loader(
@@ -358,6 +360,7 @@ def build_dataset(dataset, batch_size, num_workers, accelerator, test=False):
         shuffle=not (test),
         drop_last=not (test),
         accelerator=accelerator,
+        fixed_length=fixed_length
     )
     return loader
 
