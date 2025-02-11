@@ -172,9 +172,9 @@ data/
 ### Evaluation Scripts
 Please refer to the [eval.md](eval/eval.md) for more details.
 
-## Finetuning
+## Fine-tuning
 
-
+To fine-tune the released checkpoints, you can use the two provided config files as a starting point. Note that these configs correspond to the final stage of training, where the goal is to train the model to handle <strong>long sequences</strong>. Therefore, in these configs, the encoders are frozen, and single-view datasets are removed. You may adjust the configurations as needed to suit your requirements.
 
 ```
 # Remember to replace the dataset path to your own path
