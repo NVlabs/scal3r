@@ -695,10 +695,10 @@ class PointCloudViewer:
                 max=self.num_frames - 1,
                 step=1,
                 initial_value=0,
-                disabled=True,
+                disabled=False,
             )
-            gui_next_frame = self.server.add_gui_button("Next Step", disabled=True)
-            gui_prev_frame = self.server.add_gui_button("Prev Step", disabled=True)
+            gui_next_frame = self.server.add_gui_button("Next Step", disabled=False)
+            gui_prev_frame = self.server.add_gui_button("Prev Step", disabled=False)
             gui_playing = self.server.add_gui_checkbox("Playing", False)
             gui_framerate = self.server.add_gui_slider(
                 "FPS", min=1, max=60, step=0.1, initial_value=1
