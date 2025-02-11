@@ -183,10 +183,10 @@ To fine-tune the released checkpoints, you can use the two provided config files
 
 cd src
 
-# finetune 224 checkpoint
+# finetune 512 checkpoint
 CUDA_LAUNCH_BLOCKING=1 NCCL_DEBUG=TRACE TORCH_DISTRIBUTED_DEBUG=DETAIL HYDRA_FULL_ERROR=1 accelerate launch --multi_gpu train.py  --config-name dpt_512_vary_4_64
 
-# finetune 512 checkpoint
+# finetune 224 checkpoint
 CUDA_LAUNCH_BLOCKING=1 NCCL_DEBUG=TRACE TORCH_DISTRIBUTED_DEBUG=DETAIL HYDRA_FULL_ERROR=1 accelerate launch --multi_gpu train.py  --config-name linear_224_fixed_16
 ```
 
