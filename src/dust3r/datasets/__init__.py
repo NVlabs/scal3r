@@ -10,6 +10,7 @@ from .dl3dv import DL3DV_Multi
 from .dynamic_replica import DynamicReplica
 from .eden import EDEN_Multi
 from .hypersim import HyperSim_Multi
+from .hoi4d import HOI4D_Multi
 from .irs import IRS
 from .mapfree import MapFree_Multi
 from .megadepth import MegaDepth_Multi  # noqa

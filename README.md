@@ -173,48 +173,8 @@ data/
 ### Evaluation Scripts
 Please refer to the [eval.md](eval/eval.md) for more details.
 
-## Training Configurations
-
-Here are some commands we used for training the models. The model trained with the following commands might not be strictly equivalent to our released checkpoints, but they should be close enough.
-
-```
-# Remember to replace the dataset path to your own path
-
-cd src/
-
-# stage 1, train 224+linear model on static datasets
-CUDA_LAUNCH_BLOCKING=1 NCCL_DEBUG=TRACE TORCH_DISTRIBUTED_DEBUG=DETAIL HYDRA_FULL_ERROR=1 accelerate launch --multi_gpu train.py  --config-name stage1
-
-# stage 2, finetune 224+linear model on all datasets
-CUDA_LAUNCH_BLOCKING=1 NCCL_DEBUG=TRACE TORCH_DISTRIBUTED_DEBUG=DETAIL HYDRA_FULL_ERROR=1 accelerate launch --multi_gpu train.py  --config-name stage2
-
-# stage 3, train 512+dpt model on all datasets
-CUDA_LAUNCH_BLOCKING=1 NCCL_DEBUG=TRACE TORCH_DISTRIBUTED_DEBUG=DETAIL HYDRA_FULL_ERROR=1 accelerate launch --multi_gpu train.py  --config-name stage3
-
-# stage 4, train 512+dpt model on long sequences (32 views)
-CUDA_LAUNCH_BLOCKING=1 NCCL_DEBUG=TRACE TORCH_DISTRIBUTED_DEBUG=DETAIL HYDRA_FULL_ERROR=1 accelerate launch --multi_gpu train.py  --config-name stage4
-
-# Finally, fientune 512+dpt model on 4-64 views
-CUDA_LAUNCH_BLOCKING=1 NCCL_DEBUG=TRACE TORCH_DISTRIBUTED_DEBUG=DETAIL HYDRA_FULL_ERROR=1 accelerate launch --multi_gpu train.py  --config-name dpt_512_vary_4_64
-
-```
-
-## Fine-tuning
-
-To fine-tune the released checkpoints, you can use the two provided config files as a starting point. Note that these configs correspond to the final stage of training, where the goal is to train the model to handle <strong>long sequences</strong>. Therefore, in these configs, the encoders are frozen, and single-view datasets are removed. You may adjust the configurations as needed to suit your requirements.
-
-```
-# Remember to replace the dataset path to your own path
-# the script has been tested on a 8xA100(80G) machine
-
-cd src/
-
-# finetune 512 checkpoint
-CUDA_LAUNCH_BLOCKING=1 NCCL_DEBUG=TRACE TORCH_DISTRIBUTED_DEBUG=DETAIL HYDRA_FULL_ERROR=1 accelerate launch --multi_gpu train.py  --config-name dpt_512_vary_4_64
-
-# finetune 224 checkpoint
-CUDA_LAUNCH_BLOCKING=1 NCCL_DEBUG=TRACE TORCH_DISTRIBUTED_DEBUG=DETAIL HYDRA_FULL_ERROR=1 accelerate launch --multi_gpu train.py  --config-name linear_224_fixed_16
-```
+## Training and Fine-tuning
+Please refer to the [train.md](train.md) for more details.
 
 ## Acknowledgements
 Our code is based on the following awesome repositories:

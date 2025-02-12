@@ -179,7 +179,7 @@ train_dataset: 22400 @ ${dataset1} + 28000 @ ${dataset2} + 28000 @ ${dataset3} +
   + 3600 @ ${dataset16} + 9600 @ ${dataset17} + 4800 @ ${dataset18} + 12000 @ ${dataset19}
   + 16800 @ ${dataset26} + 1200 @ ${dataset27} + 4800 @ ${dataset28} + 2400 @ ${dataset29}
   + 14400 @ ${dataset30} + 7200 @ ${dataset31} + 9600 @ ${dataset32}
-test_dataset: "1000 @ ARKitScenes_Multi(split='test', ROOT='../../data/dust3r_data/processed_arkitscenes/', resolution=224, num_views=4, seed=42, n_corres=0)
+test_dataset: 1000 @ ARKitScenes_Multi(split='test', ROOT='../../data/dust3r_data/processed_arkitscenes/', resolution=224, num_views=4, seed=42, n_corres=0)
 
 seed: 0
 batch_size: 16

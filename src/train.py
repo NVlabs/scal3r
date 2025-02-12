@@ -112,7 +112,7 @@ def train(args):
         gradient_accumulation_steps=args.accum_iter,
         mixed_precision="bf16",
         kwargs_handlers=[
-            DistributedDataParallelKwargs(find_unused_parameters=False),
+            DistributedDataParallelKwargs(find_unused_parameters=True),
             InitProcessGroupKwargs(timeout=timedelta(seconds=6000)),
         ],
     )
@@ -191,6 +191,8 @@ def train(args):
 
     if args.gradient_checkpointing:
         model.gradient_checkpointing_enable()
+    if args.long_context:
+        model.fixed_input_length = False
 
     if args.pretrained and not args.resume:
         printer.info(f"Loading pretrained: {args.pretrained}")

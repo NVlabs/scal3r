@@ -229,6 +229,7 @@ class ARCroco3DStereo(CroCoNet):
 
     def __init__(self, config: ARCroco3DStereoConfig):
         self.gradient_checkpointing = False
+        self.fixed_input_length = True
         config.croco_kwargs = fill_default_args(
             config.croco_kwargs, CrocoConfig.__init__
         )
@@ -676,14 +677,14 @@ class ARCroco3DStereo(CroCoNet):
                     *final_output[-1][::+1],
                     pos_state,
                     pos_img,
-                    use_reentrant=True,
+                    use_reentrant=not self.fixed_input_length,
                 )
                 f_img, _ = checkpoint(
                     blk_img,
                     *final_output[-1][::-1],
                     pos_img,
                     pos_state,
-                    use_reentrant=True,
+                    use_reentrant=not self.fixed_input_length,
                 )
             else:
                 f_state, _ = blk_state(*final_output[-1][::+1], pos_state, pos_img)
