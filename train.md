@@ -1,11 +1,14 @@
 # Training
 
-> This is an academic work conducted under resource constraints. Our model was trained in an continuously updating manner, which makes releasing the entire path of training recipe challenging. Here we release some configurations that we think is representative, and if you want to re-train or fine-tune the model we recommend starting here. There are many design choices here and we would love to see the community explore this further!
+This is an academic work conducted under resource constraints. Our model was trained in an continuously updating manner, which makes releasing the entire path of training recipe challenging. Here we release some configurations that we think is representative, and if you want to re-train or fine-tune the model we recommend starting here. There are many design choices here and we would love to see the community explore this further!
 
 ## Training Configurations
 
+You could refer to the following commands as a starting point if you would like to train from scratch.
+
 ```
 # Remember to replace the dataset path to your own path
+# the script has been tested on a 8xA100(80G) machine
 
 cd src/
 
