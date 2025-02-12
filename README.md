@@ -37,7 +37,7 @@ Official implementation of <strong>Continuous 3D Perception Model with Persisten
 - [Evaluation](#evaluation)
   - [Datasets](#datasets-1)
   - [Evaluation Scripts](#evaluation-scripts)
-- [Fine-tuning](#fine-tuning)
+- [Training and Fine-tuning](#training-and-fine-tuning)
 - [Acknowledgements](#acknowledgements)
 - [Citation](#citation)
 
