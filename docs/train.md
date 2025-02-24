@@ -1,6 +1,6 @@
 # Training
 
-This is an academic work conducted under resource constraints. Our model was trained in an continuously updating manner, which makes releasing the entire path of training recipe challenging. Here we release some configurations that we think is representative, and if you want to re-train or fine-tune the model we recommend starting here. There are many design choices here and we would love to see the community explore this further!
+Please note that this is an academic project, and due to resource constraints, we trained our model iteratively while exploring different configurations. As a result, releasing the complete training procedure is challenging. However, if you wish to train the model from scratch, we provide a set of configurations below that we believe are representative. For fine-tuning, we recommend starting with the scripts available [here](#fine-tuning). There are many design choices to consider, particularly under varying computational constraints, and we look forward to seeing the community explore these possibilities further.
 
 ## Training Configurations
 

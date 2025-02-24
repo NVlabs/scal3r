@@ -116,7 +116,7 @@ Output results will be saved to `output_dir`.
 > Currently, we accelerate the feedforward process by processing inputs in parallel within the encoder, which results in linear memory consumption as the number of frames increases.
 
 ## Datasets
-Our training data includes 32 datasets listed below. We provide processing scripts for all of them. Please download the datasets from their official sources, and refer to [preprocess.md](datasets_preprocess/preprocess.md) for processing scripts and more information about the datasets.
+Our training data includes 32 datasets listed below. We provide processing scripts for all of them. Please download the datasets from their official sources, and refer to [preprocess.md](docs/preprocess.md) for processing scripts and more information about the datasets.
 
   - [ARKitScenes](https://github.com/apple/ARKitScenes) 
   - [BlendedMVS](https://github.com/YoYo000/BlendedMVS)
@@ -171,10 +171,10 @@ data/
 ```
 
 ### Evaluation Scripts
-Please refer to the [eval.md](eval/eval.md) for more details.
+Please refer to the [eval.md](docs/eval.md) for more details.
 
 ## Training and Fine-tuning
-Please refer to the [train.md](train.md) for more details.
+Please refer to the [train.md](docs/train.md) for more details.
 
 ## Acknowledgements
 Our code is based on the following awesome repositories:
