@@ -8,11 +8,11 @@ to adjust parameters such as the model checkpoint path, image sequence directory
 image size, device, etc.
 
 Usage:
-    python demo.py [--model_path MODEL_PATH] [--seq_path SEQ_PATH] [--size IMG_SIZE]
+    python demo_ga.py [--model_path MODEL_PATH] [--seq_path SEQ_PATH] [--size IMG_SIZE]
                             [--device DEVICE] [--vis_threshold VIS_THRESHOLD] [--output_dir OUT_DIR]
 
 Example:
-    python demo.py --model_path src/cut3r_512_dpt_4_64.pth \
+    python demo_ga.py --model_path src/cut3r_512_dpt_4_64.pth \
         --seq_path examples/001 --device cuda --size 512
 """
 
@@ -32,6 +32,55 @@ import imageio.v2 as iio
 
 # Set random seed for reproducibility.
 random.seed(42)
+
+
+def forward_backward_permutations(n):
+    original = list(range(n))
+    result = [original]
+    for i in range(1, n):
+        new_list = original[i:]
+        result.append(new_list)
+        new_list = original[: i + 1][::-1]
+        result.append(new_list)
+    return result
+
+
+def listify(elems):
+    return [x for e in elems for x in e]
+
+
+def collate_with_cat(whatever, lists=False):
+    if isinstance(whatever, dict):
+        return {k: collate_with_cat(vals, lists=lists) for k, vals in whatever.items()}
+
+    elif isinstance(whatever, (tuple, list)):
+        if len(whatever) == 0:
+            return whatever
+        elem = whatever[0]
+        T = type(whatever)
+
+        if elem is None:
+            return None
+        if isinstance(elem, (bool, float, int, str)):
+            return whatever
+        if isinstance(elem, tuple):
+            return T(collate_with_cat(x, lists=lists) for x in zip(*whatever))
+        if isinstance(elem, dict):
+            return {
+                k: collate_with_cat([e[k] for e in whatever], lists=lists) for k in elem
+            }
+
+        if isinstance(elem, torch.Tensor):
+            return listify(whatever) if lists else torch.cat(whatever)
+        if isinstance(elem, np.ndarray):
+            return (
+                listify(whatever)
+                if lists
+                else torch.cat([torch.from_numpy(x) for x in whatever])
+            )
+
+        # otherwise, we just chain lists
+        return sum(whatever, T())
 
 
 def parse_args():
@@ -102,10 +151,11 @@ def prepare_input(
 
     images = load_images(img_paths, size=size)
     views = []
-
-    if raymaps is None and raymap_mask is None:
-        # Only images are provided.
-        for i in range(len(images)):
+    num_views = len(images)
+    all_permutations = forward_backward_permutations(num_views)
+    for permute in all_permutations:
+        _views = []
+        for idx, i in enumerate(permute):
             view = {
                 "img": images[i]["img"],
                 "ray_map": torch.full(
@@ -120,7 +170,7 @@ def prepare_input(
                 "true_shape": torch.from_numpy(images[i]["true_shape"]),
                 "idx": i,
                 "instance": str(i),
-                "camera_pose": torch.from_numpy(np.eye(4, dtype=np.float32)).unsqueeze(
+                "camera_pose": torch.from_numpy(np.eye(4).astype(np.float32)).unsqueeze(
                     0
                 ),
                 "img_mask": torch.tensor(True).unsqueeze(0),
@@ -128,147 +178,66 @@ def prepare_input(
                 "update": torch.tensor(True).unsqueeze(0),
                 "reset": torch.tensor(False).unsqueeze(0),
             }
-            views.append(view)
-    else:
-        # Combine images and raymaps.
-        num_views = len(images) + len(raymaps)
-        assert len(img_mask) == len(raymap_mask) == num_views
-        assert sum(img_mask) == len(images) and sum(raymap_mask) == len(raymaps)
-
-        j = 0
-        k = 0
-        for i in range(num_views):
-            view = {
-                "img": (
-                    images[j]["img"]
-                    if img_mask[i]
-                    else torch.full_like(images[0]["img"], torch.nan)
-                ),
-                "ray_map": (
-                    raymaps[k]
-                    if raymap_mask[i]
-                    else torch.full_like(raymaps[0], torch.nan)
-                ),
-                "true_shape": (
-                    torch.from_numpy(images[j]["true_shape"])
-                    if img_mask[i]
-                    else torch.from_numpy(np.int32([raymaps[k].shape[1:-1][::-1]]))
-                ),
-                "idx": i,
-                "instance": str(i),
-                "camera_pose": torch.from_numpy(np.eye(4, dtype=np.float32)).unsqueeze(
-                    0
-                ),
-                "img_mask": torch.tensor(img_mask[i]).unsqueeze(0),
-                "ray_mask": torch.tensor(raymap_mask[i]).unsqueeze(0),
-                "update": torch.tensor(img_mask[i]).unsqueeze(0),
-                "reset": torch.tensor(False).unsqueeze(0),
-            }
-            if img_mask[i]:
-                j += 1
-            if raymap_mask[i]:
-                k += 1
-            views.append(view)
-        assert j == len(images) and k == len(raymaps)
-
-    if revisit > 1:
-        new_views = []
-        for r in range(revisit):
-            for i, view in enumerate(views):
-                new_view = deepcopy(view)
-                new_view["idx"] = r * len(views) + i
-                new_view["instance"] = str(r * len(views) + i)
-                if r > 0 and not update:
-                    new_view["update"] = torch.tensor(False).unsqueeze(0)
-                new_views.append(new_view)
-        return new_views
-
+            _views.append(view)
+        views.append(_views)
     return views
 
 
-def prepare_output(outputs, outdir, revisit=1, use_pose=True):
-    """
-    Process inference outputs to generate point clouds and camera parameters for visualization.
+def prepare_output(output, outdir, device):
+    from cloud_opt.dust3r_opt import global_aligner, GlobalAlignerMode
 
-    Args:
-        outputs (dict): Inference outputs.
-        revisit (int): Number of revisits per view.
-        use_pose (bool): Whether to transform points using camera pose.
+    with torch.enable_grad():
+        mode = GlobalAlignerMode.PointCloudOptimizer
+        scene = global_aligner(
+            output,
+            device=device,
+            mode=mode,
+            verbose=True,
+        )
+        lr = 0.01
+        loss = scene.compute_global_alignment(
+            init="mst",
+            niter=300,
+            schedule="linear",
+            lr=lr,
+        )
+    scene.clean_pointcloud()
+    pts3d = scene.get_pts3d()
+    depths = scene.get_depthmaps()
+    poses = scene.get_im_poses()
+    focals = scene.get_focals()
+    pps = scene.get_principal_points()
+    confs = scene.get_conf(mode="none")
 
-    Returns:
-        tuple: (points, colors, confidence, camera parameters dictionary)
-    """
-    from src.dust3r.utils.camera import pose_encoding_to_camera
-    from src.dust3r.post_process import estimate_focal_knowing_depth
-    from src.dust3r.utils.geometry import geotrf
-
-    # Only keep the outputs corresponding to one full pass.
-    valid_length = len(outputs["pred"]) // revisit
-    outputs["pred"] = outputs["pred"][-valid_length:]
-    outputs["views"] = outputs["views"][-valid_length:]
-
-    pts3ds_self_ls = [output["pts3d_in_self_view"].cpu() for output in outputs["pred"]]
-    pts3ds_other = [output["pts3d_in_other_view"].cpu() for output in outputs["pred"]]
-    conf_self = [output["conf_self"].cpu() for output in outputs["pred"]]
-    conf_other = [output["conf"].cpu() for output in outputs["pred"]]
-    pts3ds_self = torch.cat(pts3ds_self_ls, 0)
-
-    # Recover camera poses.
-    pr_poses = [
-        pose_encoding_to_camera(pred["camera_pose"].clone()).cpu()
-        for pred in outputs["pred"]
-    ]
-    R_c2w = torch.cat([pr_pose[:, :3, :3] for pr_pose in pr_poses], 0)
-    t_c2w = torch.cat([pr_pose[:, :3, 3] for pr_pose in pr_poses], 0)
-
-    if use_pose:
-        transformed_pts3ds_other = []
-        for pose, pself in zip(pr_poses, pts3ds_self):
-            transformed_pts3ds_other.append(geotrf(pose, pself.unsqueeze(0)))
-        pts3ds_other = transformed_pts3ds_other
-        conf_other = conf_self
-
-    # Estimate focal length based on depth.
-    B, H, W, _ = pts3ds_self.shape
-    pp = torch.tensor([W // 2, H // 2], device=pts3ds_self.device).float().repeat(B, 1)
-    focal = estimate_focal_knowing_depth(pts3ds_self, pp, focal_mode="weiszfeld")
-
-    colors = [
-        0.5 * (output["img"].permute(0, 2, 3, 1) + 1.0) for output in outputs["views"]
-    ]
-
+    pts3ds_other = [pts.detach().cpu().unsqueeze(0) for pts in pts3d]
+    depths = [d.detach().cpu().unsqueeze(0) for d in depths]
+    colors = [torch.from_numpy(img).unsqueeze(0) for img in scene.imgs]
+    confs = [conf.detach().cpu().unsqueeze(0) for conf in confs]
     cam_dict = {
-        "focal": focal.cpu().numpy(),
-        "pp": pp.cpu().numpy(),
-        "R": R_c2w.cpu().numpy(),
-        "t": t_c2w.cpu().numpy(),
+        "focal": focals.detach().cpu().numpy(),
+        "pp": pps.detach().cpu().numpy(),
+        "R": poses.detach().cpu().numpy()[..., :3, :3],
+        "t": poses.detach().cpu().numpy()[..., :3, 3],
     }
 
-    pts3ds_self_tosave = pts3ds_self  # B, H, W, 3
-    depths_tosave = pts3ds_self_tosave[..., 2]
+    depths_tosave = torch.cat(depths)  # B, H, W
     pts3ds_other_tosave = torch.cat(pts3ds_other)  # B, H, W, 3
-    conf_self_tosave = torch.cat(conf_self)  # B, H, W
-    conf_other_tosave = torch.cat(conf_other)  # B, H, W
-    colors_tosave = torch.cat(
-        [
-            0.5 * (output["img"].permute(0, 2, 3, 1).cpu() + 1.0)
-            for output in outputs["views"]
-        ]
-    )  # [B, H, W, 3]
-    cam2world_tosave = torch.cat(pr_poses)  # B, 4, 4
+    conf_self_tosave = torch.cat(confs)  # B, H, W
+    colors_tosave = torch.cat(colors)  # [B, H, W, 3]
+    cam2world_tosave = poses.detach().cpu()  # B, 4, 4
     intrinsics_tosave = (
         torch.eye(3).unsqueeze(0).repeat(cam2world_tosave.shape[0], 1, 1)
     )  # B, 3, 3
-    intrinsics_tosave[:, 0, 0] = focal.detach().cpu()
-    intrinsics_tosave[:, 1, 1] = focal.detach().cpu()
-    intrinsics_tosave[:, 0, 2] = pp[:, 0]
-    intrinsics_tosave[:, 1, 2] = pp[:, 1]
+    intrinsics_tosave[:, 0, 0] = focals[:, 0].detach().cpu()
+    intrinsics_tosave[:, 1, 1] = focals[:, 0].detach().cpu()
+    intrinsics_tosave[:, 0, 2] = pps[:, 0].detach().cpu()
+    intrinsics_tosave[:, 1, 2] = pps[:, 1].detach().cpu()
 
     os.makedirs(os.path.join(outdir, "depth"), exist_ok=True)
     os.makedirs(os.path.join(outdir, "conf"), exist_ok=True)
     os.makedirs(os.path.join(outdir, "color"), exist_ok=True)
     os.makedirs(os.path.join(outdir, "camera"), exist_ok=True)
-    for f_id in range(len(pts3ds_self)):
+    for f_id in range(len(depths_tosave)):
         depth = depths_tosave[f_id].cpu().numpy()
         conf = conf_self_tosave[f_id].cpu().numpy()
         color = colors_tosave[f_id].cpu().numpy()
@@ -286,7 +255,7 @@ def prepare_output(outputs, outdir, revisit=1, use_pose=True):
             intrinsics=intrins,
         )
 
-    return pts3ds_other, colors, conf_other, cam_dict
+    return pts3ds_other, colors, confs, cam_dict
 
 
 def parse_seq_path(p):
@@ -371,7 +340,55 @@ def run_inference(args):
     # Run inference.
     print("Running inference...")
     start_time = time.time()
-    outputs, state_args = inference(views, model, device)
+    output = {
+        "view1": [],
+        "view2": [],
+        "pred1": [],
+        "pred2": [],
+    }
+    edges = []
+    for _views in views:
+        outputs, state_args = inference(_views, model, device)
+        for view_id in range(1, len(outputs["views"])):
+            output["view1"].append(outputs["views"][0])
+            output["view2"].append(outputs["views"][view_id])
+            output["pred1"].append(outputs["pred"][0])
+            output["pred2"].append(outputs["pred"][view_id])
+
+            edges.append((outputs["views"][0]["idx"], outputs["views"][view_id]["idx"]))
+    list_of_tuples = edges
+    sorted_indices = sorted(
+        range(len(list_of_tuples)),
+        key=lambda x: (
+            list_of_tuples[x][0] > list_of_tuples[x][1],  # Grouping condition
+            (
+                list_of_tuples[x][1]
+                if list_of_tuples[x][0] > list_of_tuples[x][1]
+                else list_of_tuples[x][0]
+            ),  # First sort key
+            (
+                list_of_tuples[x][0]
+                if list_of_tuples[x][0] > list_of_tuples[x][1]
+                else list_of_tuples[x][1]
+            ),  # Second sort key
+        ),
+    )
+    new_output = {
+        "view1": [],
+        "view2": [],
+        "pred1": [],
+        "pred2": [],
+    }
+    for i in sorted_indices:
+        new_output["view1"].append(output["view1"][i])
+        new_output["view2"].append(output["view2"][i])
+        new_output["pred1"].append(output["pred1"][i])
+        new_output["pred2"].append(output["pred2"][i])
+    output["view1"] = collate_with_cat(new_output["view1"])
+    output["view2"] = collate_with_cat(new_output["view2"])
+    output["pred1"] = collate_with_cat(new_output["pred1"])
+    output["pred2"] = collate_with_cat(new_output["pred2"])
+
     total_time = time.time() - start_time
     per_frame_time = total_time / len(views)
     print(
@@ -380,8 +397,9 @@ def run_inference(args):
 
     # Process outputs for visualization.
     print("Preparing output for visualization...")
+
     pts3ds_other, colors, conf, cam_dict = prepare_output(
-        outputs, args.output_dir, 1, True
+        output, args.output_dir, device
     )
 
     # Convert tensors to numpy arrays for visualization.
@@ -402,7 +420,7 @@ def run_inference(args):
         edge_color_list=edge_colors,
         show_camera=True,
         vis_threshold=args.vis_threshold,
-        size = args.size
+        size=args.size,
     )
     viewer.run()
 

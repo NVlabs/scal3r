@@ -110,6 +110,9 @@ python demo.py --model_path MODEL_PATH --seq_path SEQ_PATH --size SIZE --vis_thr
 #
 #     python demo.py --model_path src/cut3r_224_linear_4.pth --size 224 \
 #         --seq_path examples/001 --vis_threshold 1.5 --output_dir tmp
+
+# the following script will run inference with global alignment and visualize the output with viser on port 8080
+python demo_ga.py --model_path MODEL_PATH --seq_path SEQ_PATH --size SIZE --vis_threshold VIS_THRESHOLD --output_dir OUT_DIR
 ```
 Output results will be saved to `output_dir`.
 
