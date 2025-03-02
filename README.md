@@ -6,7 +6,7 @@
 <hr>
 
 <br>
-Official implementation of <strong>Continuous 3D Perception Model with Persistent State</strong>
+Official implementation of <strong>Continuous 3D Perception Model with Persistent State</strong>, CVPR 2025
 
 [*QianqianWang**](https://qianqianwang68.github.io/),
 [*Yifei Zhang**](https://forrest-110.github.io/),
@@ -14,7 +14,9 @@ Official implementation of <strong>Continuous 3D Perception Model with Persisten
 [*Alexei A Efros*](https://people.eecs.berkeley.edu/~efros/),
 [*Angjoo Kanazawa*](https://people.eecs.berkeley.edu/~kanazawa/)
 
+
 (*: equal contribution)
+
 <div style="line-height: 1;">
   <a href="https://cut3r.github.io/" target="_blank" style="margin: 2px;">
     <img alt="Website" src="https://img.shields.io/badge/Website-CUT3R-536af5?color=536af5&logoColor=white" style="display: inline-block; vertical-align: middle;"/>
