@@ -33,17 +33,15 @@ import imageio.v2 as iio
 # Set random seed for reproducibility.
 random.seed(42)
 
-
-def forward_backward_permutations(n):
+def forward_backward_permutations(n, interval=1):
     original = list(range(n))
     result = [original]
     for i in range(1, n):
-        new_list = original[i:]
+        new_list = original[i::interval]
         result.append(new_list)
-        new_list = original[: i + 1][::-1]
+        new_list = original[: i + 1][::-interval]
         result.append(new_list)
     return result
-
 
 def listify(elems):
     return [x for e in elems for x in e]
@@ -152,7 +150,7 @@ def prepare_input(
     images = load_images(img_paths, size=size)
     views = []
     num_views = len(images)
-    all_permutations = forward_backward_permutations(num_views)
+    all_permutations = forward_backward_permutations(num_views, interval=2)
     for permute in all_permutations:
         _views = []
         for idx, i in enumerate(permute):
