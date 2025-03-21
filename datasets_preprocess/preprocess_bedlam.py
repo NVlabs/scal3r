@@ -252,7 +252,11 @@ def process_seq(args):
         cam_int,
     ) = args
 
+    out_rgb_dir = os.path.join(outdir, '_'.join([scene, seq_name]), 'rgb')
+    out_depth_dir = os.path.join(outdir, '_'.join([scene, seq_name]), 'depth')
     out_cam_dir = os.path.join(outdir, "_".join([scene, seq_name]), "cam")
+    os.makedirs(out_rgb_dir, exist_ok=True)
+    os.makedirs(out_depth_dir, exist_ok=True)
     os.makedirs(out_cam_dir, exist_ok=True)
 
     assert (
@@ -262,13 +266,17 @@ def process_seq(args):
         depthname = imgname.replace(".png", "_depth.exr")
         imgpath = os.path.join(image_folder_base, imgname)
         depthpath = os.path.join(depth_folder_base, depthname)
-        if not (os.path.exists(imgpath) and os.path.exists(depthpath)):
-            continue
-
+        depth= OpenEXR.File(depthpath).parts[0].channels['Depth'].pixels
+        depth = depth.astype(np.float32)/100.0
+        
+        outimg_path = os.path.join(out_rgb_dir, os.path.basename(imgpath))
+        outdepth_path = os.path.join(out_depth_dir, os.path.basename(imgpath).replace('.png','.npy'))
         outcam_path = os.path.join(
             out_cam_dir, os.path.basename(imgpath).replace(".png", ".npz")
         )
-        # Save intrinsics and the inverse extrinsics (camera pose).
+
+        shutil.copy(imgpath, outimg_path)
+        np.save(outdepth_path, depth)
         np.savez(outcam_path, intrinsics=intr, pose=np.linalg.inv(ext))
     return None
 
