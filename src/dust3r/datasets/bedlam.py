@@ -164,9 +164,10 @@ hdri_scenes = [
 class BEDLAM_Multi(BaseMultiViewDataset):
     def __init__(self, *args, ROOT, **kwargs):
         self.ROOT = ROOT
-        self.pose_root = os.path.join(
-            os.path.dirname(ROOT), f"{os.path.basename(ROOT)}_pose"
-        )
+        # self.pose_root = os.path.join(
+        #     os.path.dirname(ROOT), f"{os.path.basename(ROOT)}_pose"
+        # )
+        self.pose_root = self.ROOT
         assert os.path.exists(self.pose_root)
         self.video = True
         self.is_metric = True
