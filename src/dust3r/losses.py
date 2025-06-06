@@ -1112,7 +1112,7 @@ class ConfLoss(MultiLoss):
         final_loss = sum(conf_losses) / len(conf_losses) * 2.0
         if "pose_loss" in details:
             final_loss = (
-                final_loss + details["pose_loss"].clip(max=0.3) * 5.0
+                final_loss + details["pose_loss"] #.clip(max=0.3) * 5.0
             )  # , details
         if "scale_loss" in details:
             final_loss = final_loss + details["scale_loss"]
