@@ -103,6 +103,7 @@ class DynamicReplica(BaseMultiViewDataset):
 
             cam = np.load(osp.join(cam_dir, basename + ".npz"))
             camera_pose = cam["pose"]
+            camera_pose[:3,:3] = camera_pose[:3,:3].T
             intrinsics = cam["intrinsics"]
             rgb_image, depthmap, intrinsics = self._crop_resize_if_necessary(
                 rgb_image, depthmap, intrinsics, resolution, rng=rng, info=view_idx
