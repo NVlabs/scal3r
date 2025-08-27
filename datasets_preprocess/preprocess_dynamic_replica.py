@@ -158,7 +158,7 @@ def _get_pytorch3d_camera(entry_viewpoint, image_size, scale: float):
     T_pytorch3d[..., :2] *= -1
     R_pytorch3d[..., :, :2] *= -1
     tvec = T_pytorch3d
-    R = R_pytorch3d
+    R = R_pytorch3d.T
 
     return R, tvec, focal_length_px, principal_point_px
 
