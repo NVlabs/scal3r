@@ -1,0 +1,140 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# NVIDIA CORPORATION and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA CORPORATION is strictly prohibited.
+
+# @package _global_
+# Experiment config for training relative pose prompt on STream3R
+# This config freezes the base model and only trains:
+#   - rel_pose_token (in aggregator)
+#   - rel_pose_decoder (in camera_head)
+
+defaults:
+  - /experiment/stream3r/stream3r
+
+tags: ["train", "stream3r", "rel_pose_prompt"]
+
+task_name: stream3r_rel_pose
+
+slurm_job_id: 99999  # must set in the command line
+
+# Disable testing since test_step is not implemented
+test: false
+
+paths:
+  run_folder_name: ${task_name}_${slurm_job_id}
+
+logger:
+  wandb: null
+
+data:
+  data_scaling: 1.0
+  data_root: data/mast3r_data
+  num_views: 4
+  resolution:
+    - [518, 392]
+    - [518, 378]
+    - [518, 336]
+    - [518, 294]
+    - [518, 252]
+    - [518, 210]
+    - [518, 140]
+    - [378, 518]
+    - [336, 518]
+    - [294, 518]
+    - [252, 518]
+    - [224, 224]
+  allow_repeat: true
+  n_corres_train: 0
+  data_module:
+    _target_: stream3r.data.multiview_dust3r_datamodule.MultiViewDUSt3RDataModule
+    pin_memory: true
+    num_workers: 16
+    num_workers_val: 1
+    batch_size_per_device: 8
+    batch_size_per_device_val: 8
+    train_datasets:
+      - 4000 @ TartanAirWds_Multi(allow_repeat=${data.allow_repeat}, split=None, ROOT="${data.data_root}/processed_tartanair_wds_v2cc/", aug_crop=16, resolution=${data.resolution}, transform=SeqColorJitter, num_views=${data.num_views}, n_corres=${data.n_corres_train})
+
+model:
+  pretrained: weights/stream3r/model.pt
+
+  # Learning rate multipliers for relative pose parameters
+  prompt_token_lr_multiplier: 1.0
+  prompt_decoder_lr_multiplier: 1.0
+
+  net:
+    use_rel_pose_prompt: true
+    num_rel_pose_tokens: 1   # learnable base token count
+    max_ref_frames: 4        # buffer window size (can override at inference)
+    ref_feat_type: "camera_token"  # "img_feat" (mean-pooled encoder features) or "camera_token" (aggregator camera token)
+    rel_pose_global_only: false  # true: only use global-path (1024d) for rel_pose decoder; false: use concat (2048d)
+    use_align_scale: false  # true: CUT3R-style pts3d scale alignment; false: depth-based normalization
+    freeze: "rel_pose_prompt"  # Freeze all except rel_pose_token, prev_pose_proj, rel_pose_decoder
+
+  train_criterion:
+    _target_: stream3r.loss.losses.CausalLoss
+    gradient_loss: grad
+    is_metric: false
+    # Disable frozen component losses (still computed for logging + scale factor)
+    pts3d_loss_weight: 0.0
+    depth_loss_weight: 0.0
+    camera_loss_weight: 0.0
+    # Only train relative pose loss
+    use_rel_pose_loss: true
+    rel_pose_loss_weight: 1.0
+    rel_rot_loss_weight: 1.0
+    use_align_scale: false
+
+  validation_criterion:
+    _target_: stream3r.loss.losses.CausalLoss
+    gradient_loss: grad
+    is_metric: false
+    pts3d_loss_weight: 0.0
+    depth_loss_weight: 0.0
+    camera_loss_weight: 0.0
+    use_rel_pose_loss: true
+    rel_pose_loss_weight: 1.0
+    rel_rot_loss_weight: 1.0
+    use_align_scale: false
+
+  optimizer:
+    _target_: torch.optim.AdamW
+    _partial_: true
+    lr: 1e-4
+    betas:
+      - 0.9
+      - 0.95
+    weight_decay: 0.05
+
+  scheduler:
+    warmup_epochs: 5
+
+trainer:
+  devices: auto
+  max_epochs: 40
+  accumulate_grad_batches: 1
+  gradient_clip_val: 1.0
+  strategy:
+    _target_: lightning.pytorch.strategies.DeepSpeedStrategy
+    timeout:
+      _target_: datetime.timedelta
+      minutes: 80
+  limit_val_batches: 0
+  precision: bf16-mixed
+  log_every_n_steps: 20
+
+callbacks:
+  model_checkpoint:
+    every_n_train_steps: null
+    every_n_epochs: 1
+    save_on_train_epoch_end: true
+    save_top_k: -1
+    filename: "{epoch:03d}-{step:08d}"
+    save_last: true
+    monitor: "train/loss"
+  early_stopping:
+    monitor: "train/loss"
