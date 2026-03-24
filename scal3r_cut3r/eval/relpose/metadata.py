@@ -1,0 +1,326 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# NVIDIA CORPORATION and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA CORPORATION is strictly prohibited.
+
+import os
+import glob
+from tqdm import tqdm
+
+# Define the merged dataset metadata dictionary
+dataset_metadata = {
+    "davis": {
+        "img_path": "data/davis/DAVIS/JPEGImages/480p",
+        "mask_path": "data/davis/DAVIS/masked_images/480p",
+        "dir_path_func": lambda img_path, seq: os.path.join(img_path, seq),
+        "gt_traj_func": lambda img_path, anno_path, seq: None,
+        "traj_format": None,
+        "seq_list": None,
+        "full_seq": True,
+        "mask_path_seq_func": lambda mask_path, seq: os.path.join(mask_path, seq),
+        "skip_condition": None,
+        "process_func": None,  # Not used in mono depth estimation
+    },
+    "kitti": {
+        "img_path": "data/kitti/depth_selection/val_selection_cropped/image_gathered",  # Default path
+        "mask_path": None,
+        "dir_path_func": lambda img_path, seq: os.path.join(img_path, seq),
+        "gt_traj_func": lambda img_path, anno_path, seq: None,
+        "traj_format": None,
+        "seq_list": None,
+        "full_seq": True,
+        "mask_path_seq_func": lambda mask_path, seq: None,
+        "skip_condition": None,
+        "process_func": lambda args, img_path: process_kitti(args, img_path),
+    },
+    "bonn": {
+        "img_path": "data/bonn/rgbd_bonn_dataset",
+        "mask_path": None,
+        "dir_path_func": lambda img_path, seq: os.path.join(
+            img_path, f"rgbd_bonn_{seq}", "rgb_110"
+        ),
+        "gt_traj_func": lambda img_path, anno_path, seq: os.path.join(
+            img_path, f"rgbd_bonn_{seq}", "groundtruth_110.txt"
+        ),
+        "traj_format": "tum",
+        "seq_list": ["balloon2", "crowd2", "crowd3", "person_tracking2", "synchronous"],
+        "full_seq": False,
+        "mask_path_seq_func": lambda mask_path, seq: None,
+        "skip_condition": None,
+        "process_func": lambda args, img_path: process_bonn(args, img_path),
+    },
+    "nyu": {
+        "img_path": "data/nyu-v2/val/nyu_images",
+        "mask_path": None,
+        "process_func": lambda args, img_path: process_nyu(args, img_path),
+    },
+    "scannet": {
+        "img_path": "data/scannetv2",
+        "mask_path": None,
+        "dir_path_func": lambda img_path, seq: os.path.join(img_path, seq, "color_90"),
+        "gt_traj_func": lambda img_path, anno_path, seq: os.path.join(
+            img_path, seq, "pose_90.txt"
+        ),
+        "traj_format": "replica",
+        "seq_list": None,
+        "full_seq": True,
+        "mask_path_seq_func": lambda mask_path, seq: None,
+        "skip_condition": None,  # lambda save_dir, seq: os.path.exists(os.path.join(save_dir, seq)),
+        "process_func": lambda args, img_path: process_scannet(args, img_path),
+    },
+    "scannet-257": {
+        "img_path": "data/scannetv2_3_257",
+        "mask_path": None,
+        "dir_path_func": lambda img_path, seq: os.path.join(img_path, seq, "color_90"),
+        "gt_traj_func": lambda img_path, anno_path, seq: os.path.join(
+            img_path, seq, "pose_90.txt"
+        ),
+        "traj_format": "replica",
+        "seq_list": None,
+        "full_seq": True,
+        "mask_path_seq_func": lambda mask_path, seq: None,
+        "skip_condition": None,  # lambda save_dir, seq: os.path.exists(os.path.join(save_dir, seq)),
+        "process_func": lambda args, img_path: process_scannet(args, img_path),
+    },
+    "scannet-129": {
+        "img_path": "data/scannetv2_3_129",
+        "mask_path": None,
+        "dir_path_func": lambda img_path, seq: os.path.join(img_path, seq, "color_90"),
+        "gt_traj_func": lambda img_path, anno_path, seq: os.path.join(
+            img_path, seq, "pose_90.txt"
+        ),
+        "traj_format": "replica",
+        "seq_list": None,
+        "full_seq": True,
+        "mask_path_seq_func": lambda mask_path, seq: None,
+        "skip_condition": None,  # lambda save_dir, seq: os.path.exists(os.path.join(save_dir, seq)),
+        "process_func": lambda args, img_path: process_scannet(args, img_path),
+    },
+    "scannet-65": {
+        "img_path": "data/scannetv2_3_65",
+        "mask_path": None,
+        "dir_path_func": lambda img_path, seq: os.path.join(img_path, seq, "color_90"),
+        "gt_traj_func": lambda img_path, anno_path, seq: os.path.join(
+            img_path, seq, "pose_90.txt"
+        ),
+        "traj_format": "replica",
+        "seq_list": None,
+        "full_seq": True,
+        "mask_path_seq_func": lambda mask_path, seq: None,
+        "skip_condition": None,  # lambda save_dir, seq: os.path.exists(os.path.join(save_dir, seq)),
+        "process_func": lambda args, img_path: process_scannet(args, img_path),
+    },
+    "scannet-33": {
+        "img_path": "data/scannetv2_3_33",
+        "mask_path": None,
+        "dir_path_func": lambda img_path, seq: os.path.join(img_path, seq, "color_90"),
+        "gt_traj_func": lambda img_path, anno_path, seq: os.path.join(
+            img_path, seq, "pose_90.txt"
+        ),
+        "traj_format": "replica",
+        "seq_list": None,
+        "full_seq": True,
+        "mask_path_seq_func": lambda mask_path, seq: None,
+        "skip_condition": None,  # lambda save_dir, seq: os.path.exists(os.path.join(save_dir, seq)),
+        "process_func": lambda args, img_path: process_scannet(args, img_path),
+    },
+    "tum": {
+        "img_path": "data/tum",
+        "mask_path": None,
+        "dir_path_func": lambda img_path, seq: os.path.join(img_path, seq, "rgb_90"),
+        "gt_traj_func": lambda img_path, anno_path, seq: os.path.join(
+            img_path, seq, "groundtruth_90.txt"
+        ),
+        "traj_format": "tum",
+        "seq_list": None,
+        "full_seq": True,
+        "mask_path_seq_func": lambda mask_path, seq: None,
+        "skip_condition": None,
+        "process_func": None,
+    },
+    "tum_full": {
+        "img_path": "data/tum",
+        "mask_path": None,
+        "dir_path_func": lambda img_path, seq: os.path.join(img_path, seq, "rgb"),
+        "gt_traj_func": lambda img_path, anno_path, seq: os.path.join(
+            img_path, seq, "groundtruth.txt"
+        ),
+        "traj_format": "tum",
+        "seq_list": None,
+        "full_seq": True,
+        "mask_path_seq_func": lambda mask_path, seq: None,
+        "skip_condition": None,
+        "process_func": None,
+    },
+    **{
+        f"tum_s1_{num}": {
+            "img_path": "data/long_tum_s1",
+            "mask_path": None,
+            "dir_path_func": lambda img_path, seq, n=num: os.path.join(img_path, seq, f"rgb_{n}"),
+            "gt_traj_func": lambda img_path, anno_path, seq, n=num: os.path.join(
+                img_path, seq, f"groundtruth_{n}.txt"
+            ),
+            "traj_format": "tum",
+            "seq_list": None,
+            "full_seq": True,
+            "mask_path_seq_func": lambda mask_path, seq: None,
+            "skip_condition": None,
+            "process_func": None,
+        }
+        for num in [50, 100, 150, 200, 300, 400, 500, 600, 700, 800, 900, 1000]
+    },
+    "sintel": {
+        "img_path": "data/sintel/training/final",
+        "anno_path": "data/sintel/training/camdata_left",
+        "mask_path": None,
+        "dir_path_func": lambda img_path, seq: os.path.join(img_path, seq),
+        "gt_traj_func": lambda img_path, anno_path, seq: os.path.join(anno_path, seq),
+        "traj_format": None,
+        "seq_list": [
+            "alley_2",
+            "ambush_4",
+            "ambush_5",
+            "ambush_6",
+            "cave_2",
+            "cave_4",
+            "market_2",
+            "market_5",
+            "market_6",
+            "shaman_3",
+            "sleeping_1",
+            "sleeping_2",
+            "temple_2",
+            "temple_3",
+        ],
+        "full_seq": False,
+        "mask_path_seq_func": lambda mask_path, seq: None,
+        "skip_condition": None,
+        "process_func": lambda args, img_path: process_sintel(args, img_path),
+    },
+    "kitti_odom": {
+        "img_path": os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                                 "reference/VIFT/data/kitti_data"),
+        "mask_path": None,
+        "dir_path_func": lambda img_path, seq: os.path.join(img_path, "sequences", seq, "image_2"),
+        "gt_traj_func": lambda img_path, anno_path, seq: os.path.join(img_path, "poses", f"{seq}.txt"),
+        "traj_format": "kitti_odom",
+        "seq_list": ["00", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10"],
+        "full_seq": False,
+        "mask_path_seq_func": lambda mask_path, seq: None,
+        "skip_condition": None,
+        "process_func": None,
+        "img_filter": lambda name: name.endswith(".png"),
+    },
+    "vkitti": {
+        "img_path": "data/processed_vkitti",
+        "mask_path": None,
+        "dir_path_func": lambda img_path, seq: os.path.join(img_path, seq),
+        "gt_traj_func": lambda img_path, anno_path, seq: os.path.join(img_path, seq),
+        "traj_format": "vkitti",
+        "seq_list": [
+            "Scene01/clone/Camera_0",
+            "Scene02/clone/Camera_0",
+            "Scene06/clone/Camera_0",
+            "Scene18/clone/Camera_0",
+            "Scene20/clone/Camera_0",
+        ],
+        "full_seq": False,
+        "mask_path_seq_func": lambda mask_path, seq: None,
+        "skip_condition": None,
+        "process_func": None,
+        "img_filter": lambda name: name.endswith("_rgb.jpg"),
+    },
+}
+
+# Long TUM sequences (stride=1, variable length)
+tum_numbers = [50, 100, 150, 200, 300, 400, 500, 600, 700, 800, 900, 1000]
+tum_configs = {
+    f"tum_s1_{num}": {
+        "img_path": "data/long_tum_s1",
+        "mask_path": None,
+        "dir_path_func": lambda img_path, seq, num=num: os.path.join(img_path, seq, f"rgb_{num}"),
+        "gt_traj_func": lambda img_path, anno_path, seq, num=num: os.path.join(
+            img_path, seq, f"groundtruth_{num}.txt"
+        ),
+        "traj_format": "tum",
+        "seq_list": None,
+        "full_seq": True,
+        "mask_path_seq_func": lambda mask_path, seq: None,
+        "skip_condition": None,
+        "process_func": None,
+    }
+    for num in tum_numbers
+}
+dataset_metadata.update(tum_configs)
+
+
+# Define processing functions for each dataset
+def process_kitti(args, img_path):
+    for dir in tqdm(sorted(glob.glob(f"{img_path}/*"))):
+        filelist = sorted(glob.glob(f"{dir}/*.png"))
+        save_dir = f"{args.output_dir}/{os.path.basename(dir)}"
+        yield filelist, save_dir
+
+
+def process_bonn(args, img_path):
+    if args.full_seq:
+        for dir in tqdm(sorted(glob.glob(f"{img_path}/*/"))):
+            filelist = sorted(glob.glob(f"{dir}/rgb/*.png"))
+            save_dir = f"{args.output_dir}/{os.path.basename(os.path.dirname(dir))}"
+            yield filelist, save_dir
+    else:
+        seq_list = (
+            ["balloon2", "crowd2", "crowd3", "person_tracking2", "synchronous"]
+            if args.seq_list is None
+            else args.seq_list
+        )
+        for seq in tqdm(seq_list):
+            filelist = sorted(glob.glob(f"{img_path}/rgbd_bonn_{seq}/rgb_110/*.png"))
+            save_dir = f"{args.output_dir}/{seq}"
+            yield filelist, save_dir
+
+
+def process_nyu(args, img_path):
+    filelist = sorted(glob.glob(f"{img_path}/*.png"))
+    save_dir = f"{args.output_dir}"
+    yield filelist, save_dir
+
+
+def process_scannet(args, img_path):
+    seq_list = sorted(glob.glob(f"{img_path}/*"))
+    for seq in tqdm(seq_list):
+        filelist = sorted(glob.glob(f"{seq}/color_90/*.jpg"))
+        save_dir = f"{args.output_dir}/{os.path.basename(seq)}"
+        yield filelist, save_dir
+
+
+def process_sintel(args, img_path):
+    if args.full_seq:
+        for dir in tqdm(sorted(glob.glob(f"{img_path}/*/"))):
+            filelist = sorted(glob.glob(f"{dir}/*.png"))
+            save_dir = f"{args.output_dir}/{os.path.basename(os.path.dirname(dir))}"
+            yield filelist, save_dir
+    else:
+        seq_list = [
+            "alley_2",
+            "ambush_4",
+            "ambush_5",
+            "ambush_6",
+            "cave_2",
+            "cave_4",
+            "market_2",
+            "market_5",
+            "market_6",
+            "shaman_3",
+            "sleeping_1",
+            "sleeping_2",
+            "temple_2",
+            "temple_3",
+        ]
+        for seq in tqdm(seq_list):
+            filelist = sorted(glob.glob(f"{img_path}/{seq}/*.png"))
+            save_dir = f"{args.output_dir}/{seq}"
+            yield filelist, save_dir
