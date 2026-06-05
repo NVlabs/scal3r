@@ -227,13 +227,11 @@ def main(args):
                             make_kf_only_callbacks(
                                 kf_window=args.kf_window,
                                 nkf_buffer_size=args.nkf_buffer_size,
+                                max_ref_frames=(args.max_ref_frames if args.max_ref_frames is not None else 4),
                                 pgo_sigma_rot=args.pgo_sigma_rot,
                                 pgo_sigma_trans=args.pgo_sigma_trans,
                                 final_batch_opt=args.final_batch_opt,
                             )
-
-                        if args.max_ref_frames is not None:
-                            model.max_ref_frames = args.max_ref_frames
 
                         with torch.cuda.amp.autocast(enabled=False):
                             start = time.time()

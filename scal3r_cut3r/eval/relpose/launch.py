@@ -57,31 +57,6 @@ def get_args_parser():
     parser.add_argument("--size", type=int, default="224")
 
     parser.add_argument(
-        "--model_update_type",
-        type=str,
-        default="cut3r",
-        help="model type for state update strategy: cut3r or ttt3r",
-    )
-    parser.add_argument(
-        "--ttt3r_bias",
-        type=float,
-        default=0.0,
-        help="bias added to cross-attn logits before sigmoid in ttt3r (0=original, positive=more update)",
-    )
-    parser.add_argument(
-        "--ttt3r_mode",
-        type=str,
-        default="attn",
-        help="ttt3r signal mode: attn (cross-attn maps, manual attention) or delta (state feat change, Flash Attention)",
-    )
-    parser.add_argument(
-        "--ttt3r_scale",
-        type=float,
-        default=10.0,
-        help="scale factor for delta mode: sigmoid((1-cos_sim)*scale + bias)",
-    )
-
-    parser.add_argument(
         "--pose_eval_stride", default=1, type=int, help="stride for pose evaluation"
     )
     parser.add_argument("--shuffle", action="store_true", default=False)
@@ -155,7 +130,7 @@ def get_args_parser():
         "--max_ref_frames",
         type=int,
         default=None,
-        help="Override model's max_ref_frames at inference time (default: model config)",
+        help="Cap on reference frames (relative-pose tokens) per frame, applied by the keyframe callback (default: 4)",
     )
     parser.add_argument(
         "--kf_window",
@@ -467,6 +442,7 @@ def eval_pose_estimation_dist(args, model, img_path, save_dir=None, mask_path=No
                 ref_frame_indices_fn, on_frame_processed, keyframe_indices, buffer_pruning_fn = make_kf_only_callbacks(
                     kf_window=args.kf_window,
                     nkf_buffer_size=args.nkf_buffer_size,
+                    max_ref_frames=(args.max_ref_frames if args.max_ref_frames is not None else 4),
                     pgo_sigma_rot=args.pgo_sigma_rot,
                     pgo_sigma_trans=args.pgo_sigma_trans,
                     pgo_position_scale=args.pgo_position_scale,
@@ -481,9 +457,6 @@ def eval_pose_estimation_dist(args, model, img_path, save_dir=None, mask_path=No
                     num_init_frames=args.num_init_frames,
                     **kf_extra_params,
                 )
-                # Override model's max_ref_frames at inference time
-                if args.max_ref_frames is not None:
-                    model.max_ref_frames = args.max_ref_frames
                 # State gating: for Scal3R on long sequences (>60 frames),
                 # keyframe-based state update reduces noise from redundant frames.
                 # Short sequences need every frame's state update.
@@ -978,8 +951,4 @@ if __name__ == "__main__":
         )
 
     model = ARCroco3DStereo.from_pretrained(args.weights)
-    model.config.model_update_type = args.model_update_type
-    model.config.ttt3r_bias = args.ttt3r_bias
-    model.config.ttt3r_mode = args.ttt3r_mode
-    model.config.ttt3r_scale = args.ttt3r_scale
     eval_pose_estimation(args, model, save_dir=args.output_dir)

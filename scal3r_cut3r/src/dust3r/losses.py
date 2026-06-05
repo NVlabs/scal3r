@@ -330,7 +330,6 @@ class Regr3DPose(Criterion, MultiLoss):
         rot_loss_weight=10.0,
         trans_loss_weight=1.0,
         use_align_scale=False,
-        rel_pose_loss_gamma=0.8,
     ):
         super().__init__(criterion)
         if norm_mode.startswith("?"):
@@ -356,9 +355,6 @@ class Regr3DPose(Criterion, MultiLoss):
 
         # Scale alignment switch
         self.use_align_scale = use_align_scale
-
-        # Gamma decay for multi-iteration relative pose loss
-        self.rel_pose_loss_gamma = rel_pose_loss_gamma
 
     def get_norm_factor_point_cloud(
         self, pts_self, pts_cross, valids, conf_self, conf_cross, norm_self_only=False
@@ -551,39 +547,9 @@ class Regr3DPose(Criterion, MultiLoss):
         scale = S_flat.view(1, 1, -1, 1) / pose_norm_factor_pr.view(1, 1, -1, 1).clip(eps)
         pr_rel_trans = pr_rel_trans * scale
 
-        # Extract per-iteration predictions if available (transformer head)
-        all_iters = None
-        has_all_iters = any(
-            preds[i].get("relative_poses_all_iters") is not None
-            for i in range(1, N_frames)
-        )
-        if has_all_iters:
-            # Determine number of iterations
-            num_iters = None
-            for i in range(1, N_frames):
-                iters_i = preds[i].get("relative_poses_all_iters")
-                if iters_i is not None:
-                    num_iters = len(iters_i)
-                    break
-
-            all_iters = []
-            for iter_idx in range(num_iters):
-                iter_trans = torch.zeros_like(gt_rel_trans)
-                iter_rot = torch.zeros_like(gt_rel_rot)
-                for i in range(1, N_frames):
-                    iters_i = preds[i].get("relative_poses_all_iters")
-                    if iters_i is None:
-                        continue
-                    pred_rel = iters_i[iter_idx]  # (B, K_i, 4, 4)
-                    K_i = pred_rel.shape[1]
-                    iter_trans[i, :K_i] = pred_rel[:, :, :3, 3].permute(1, 0, 2)
-                    iter_rot[i, :K_i] = pred_rel[:, :, :3, :3].permute(1, 0, 2, 3)
-                iter_trans = iter_trans * scale  # same scale alignment
-                all_iters.append({'trans': iter_trans, 'rot': iter_rot})
-
         return (
             {'trans': gt_rel_trans, 'rot': gt_rel_rot, 'valid': valid_mask},
-            {'trans': pr_rel_trans, 'rot': pr_rel_rot, 'all_iters': all_iters}
+            {'trans': pr_rel_trans, 'rot': pr_rel_rot}
         )
 
     def get_all_pts3d(
@@ -1063,11 +1029,11 @@ class Regr3DPose(Criterion, MultiLoss):
         return trans_loss_weight * trans_loss + self.rot_loss_weight * rot_loss
 
     def compute_relative_pose_token_loss(self, gt_relative_poses, pr_relative_poses):
-        """Compute relative pose token loss, with gamma-weighted multi-iteration support.
+        """Compute relative pose token loss.
 
         Args:
             gt_relative_poses: dict with 'trans' (N, K, B, 3), 'rot' (N, K, B, 3, 3), 'valid' (N, K)
-            pr_relative_poses: dict with 'trans', 'rot', and optionally 'all_iters'
+            pr_relative_poses: dict with 'trans', 'rot'
 
         Returns:
             relative_pose_loss: Weighted sum of translation and rotation losses
@@ -1082,29 +1048,10 @@ class Regr3DPose(Criterion, MultiLoss):
         if not valid.any():
             return torch.tensor(0.0), {}
 
-        all_iters = pr_relative_poses.get('all_iters')
-        if all_iters is not None:
-            # Gamma-weighted multi-iteration loss
-            gamma = self.rel_pose_loss_gamma
-            num_iters = len(all_iters)
-            total_loss = torch.tensor(0.0, device=gt_trans.device)
-            weight_sum = 0.0
-
-            for i, iter_pred in enumerate(all_iters):
-                w = gamma ** (num_iters - 1 - i)
-                weight_sum += w
-                iter_loss = self._single_iter_rel_pose_loss(
-                    gt_trans, gt_rot, valid, iter_pred['trans'], iter_pred['rot']
-                )
-                total_loss = total_loss + w * iter_loss
-
-            return total_loss / weight_sum, {}
-        else:
-            # Single-iteration loss (MLP head)
-            loss = self._single_iter_rel_pose_loss(
-                gt_trans, gt_rot, valid, pr_relative_poses['trans'], pr_relative_poses['rot']
-            )
-            return loss, {}
+        loss = self._single_iter_rel_pose_loss(
+            gt_trans, gt_rot, valid, pr_relative_poses['trans'], pr_relative_poses['rot']
+        )
+        return loss, {}
 
     def compute_loss(self, gts, preds, **kw):
         (
@@ -1247,12 +1194,11 @@ class Regr3DPoseBatchList(Regr3DPose):
         rot_loss_weight=10.0,
         trans_loss_weight=1.0,
         use_align_scale=False,
-        rel_pose_loss_gamma=0.8,
     ):
         super().__init__(
             criterion, norm_mode, gt_scale, sky_loss_value, max_metric_scale,
             use_pts_loss, use_pose_loss, use_relative_pose_loss,
-            rot_loss_weight, trans_loss_weight, use_align_scale, rel_pose_loss_gamma
+            rot_loss_weight, trans_loss_weight, use_align_scale
         )
         self.depth_only_criterion = DepthScaleShiftInvLoss()
         self.single_view_criterion = ScaleInvLoss()

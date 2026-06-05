@@ -459,6 +459,7 @@ def make_kf_only_callbacks(**params):
     num_init_frames = params.get('num_init_frames', 2)
     kf_window = params.get('kf_window', 4)
     nkf_buffer_size = params.get('nkf_buffer_size', 0)
+    max_ref_frames = params.get('max_ref_frames', 4)
     keyframe_indices = set()
     for i in range(num_init_frames):
         keyframe_indices.add(i)
@@ -556,6 +557,10 @@ def make_kf_only_callbacks(**params):
 
         if not refs:
             return None
+        # Cap to the most-recent `max_ref_frames` refs (loop refs are appended last,
+        # so they are preferentially kept). Replaces the model-side max_ref_frames cap.
+        if max_ref_frames and max_ref_frames > 0 and len(refs) > max_ref_frames:
+            refs = refs[-max_ref_frames:]
         return refs
 
     from scipy.spatial import cKDTree as _KDTree

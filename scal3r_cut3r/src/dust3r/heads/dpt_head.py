@@ -342,21 +342,10 @@ class DPTPts3dPoseWithRelativePose(nn.Module):
         if has_pose:
             in_dim = net.dec_embed_dim
             self.pose_head = PoseDecoder(hidden_size=in_dim)
-            self.rel_pose_head_type = getattr(net.config, 'rel_pose_head_type', 'mlp')
-            if self.rel_pose_head_type == 'transformer':
-                from dust3r.utils.camera import TransformerRelativePoseHead
-                self.relative_pose_head = TransformerRelativePoseHead(
-                    hidden_size=in_dim,
-                    num_prompt_tokens=getattr(net.config, 'num_prompt_tokens', 4),
-                    trunk_depth=getattr(net.config, 'rel_pose_trunk_depth', 2),
-                    num_heads=net.dec_num_heads,
-                    num_iterations=getattr(net.config, 'rel_pose_num_iterations', 4),
-                )
-            else:
-                self.relative_pose_head = RelativePoseDecoder(
-                    hidden_size=in_dim,
-                    num_prompt_tokens=getattr(net.config, 'num_prompt_tokens', 4),
-                )
+            self.relative_pose_head = RelativePoseDecoder(
+                hidden_size=in_dim,
+                num_prompt_tokens=getattr(net.config, 'num_prompt_tokens', 4),
+            )
 
     def forward(self, x, img_info, **kwargs):
         if self.has_pose:
@@ -366,20 +355,11 @@ class DPTPts3dPoseWithRelativePose(nn.Module):
                 pose = self.pose_head(pose_token)
                 rel_pose_token = kwargs.get("rel_pose_token")
                 n_valid_tokens = kwargs.get("n_valid_tokens")
-                relative_poses_all_iters = None
                 if rel_pose_token is not None:
-                    if self.rel_pose_head_type == 'transformer':
-                        T_rel_list, valid_mask = self.relative_pose_head(
-                            rel_pose_token,
-                            n_valid_tokens=n_valid_tokens,
-                        )
-                        relative_poses = T_rel_list[-1]  # final iteration
-                        relative_poses_all_iters = T_rel_list
-                    else:
-                        relative_poses, valid_mask = self.relative_pose_head(
-                            rel_pose_token,
-                            n_valid_tokens=n_valid_tokens,
-                        )
+                    relative_poses, valid_mask = self.relative_pose_head(
+                        rel_pose_token,
+                        n_valid_tokens=n_valid_tokens,
+                    )
                 else:
                     relative_poses = None
                     valid_mask = None
@@ -420,13 +400,11 @@ class DPTPts3dPoseWithRelativePose(nn.Module):
                     final_output["relative_poses_valid"] = valid_mask      # (B, N)
                     final_output["relative_pose"] = relative_poses[:, 0]  # (B, 4, 4) backward compat
                     final_output["ref_frame_indices"] = ref_frame_indices  # List[int]
-                    final_output["relative_poses_all_iters"] = relative_poses_all_iters  # List[(B,N,4,4)] or None
                 else:
                     final_output["relative_poses"] = None
                     final_output["relative_poses_valid"] = None
                     final_output["relative_pose"] = None
                     final_output["ref_frame_indices"] = None
-                    final_output["relative_poses_all_iters"] = None
                 cross_out = checkpoint(
                     self.dpt_cross,
                     x_cross,

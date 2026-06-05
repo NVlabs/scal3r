@@ -107,7 +107,7 @@ class Attention(nn.Module):
         self.proj_drop = nn.Dropout(proj_drop)
         self.rope = rope.float() if rope is not None else None
 
-    def forward(self, x, xpos, return_attn=False, n_query_suffix=0):
+    def forward(self, x, xpos, n_query_suffix=0):
         B, N, C = x.shape
 
         qkv = (
@@ -133,27 +133,17 @@ class Attention(nn.Module):
             k = k[:, :, :-n_query_suffix, :]
             v = v[:, :, :-n_query_suffix, :]
 
-        if return_attn:
-            # Compute attention manually to extract attention weights
-            attn = (q @ k.transpose(-2, -1)) * self.scale  # [B, num_heads, N, N]
-            attn_before_softmax = attn.detach().clone()
-            attn = attn.softmax(dim=-1)
-            attn = self.attn_drop(attn)
-            x = (attn @ v).transpose(1, 2).reshape(B, N, C)
-            x = self.proj(x)
-            x = self.proj_drop(x)
-            return x, (attn_before_softmax, q.detach().clone())
-        else:
-            x = (
-                scaled_dot_product_attention(
-                    query=q, key=k, value=v, dropout_p=self.attn_drop.p, scale=self.scale
-                )
-                .transpose(1, 2)
-                .reshape(B, N, C)
+        x = (
+            scaled_dot_product_attention(
+                query=q, key=k, value=v, dropout_p=self.attn_drop.p, scale=self.scale
             )
-            x = self.proj(x)
-            x = self.proj_drop(x)
-            return x
+            .transpose(1, 2)
+            .reshape(B, N, C)
+        )
+
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
 
 
 class Block(nn.Module):
@@ -217,7 +207,7 @@ class CrossAttention(nn.Module):
 
         self.rope = rope.float() if rope is not None else None
 
-    def forward(self, query, key, value, qpos, kpos, return_attn=False, n_kv_suffix_exclude=0):
+    def forward(self, query, key, value, qpos, kpos, n_kv_suffix_exclude=0):
         # VQT-style asymmetric attention: exclude trailing tokens from K/V before projection
         if n_kv_suffix_exclude > 0:
             key = key[:, :-n_kv_suffix_exclude, :]
@@ -260,27 +250,17 @@ class CrossAttention(nn.Module):
                     k = self.rope(k, kpos)
                 k = k.to(k_type)
 
-        if return_attn:
-            # Compute attention manually to extract attention weights
-            attn = (q @ k.transpose(-2, -1)) * self.scale  # [B, num_heads, Nq, Nk]
-            attn_before_softmax = attn.detach().clone()
-            attn = attn.softmax(dim=-1)
-            attn = self.attn_drop(attn)
-            x = (attn @ v).transpose(1, 2).reshape(B, Nq, C)
-            x = self.proj(x)
-            x = self.proj_drop(x)
-            return x, attn_before_softmax
-        else:
-            x = (
-                scaled_dot_product_attention(
-                    query=q, key=k, value=v, dropout_p=self.attn_drop.p, scale=self.scale
-                )
-                .transpose(1, 2)
-                .reshape(B, Nq, C)
+        x = (
+            scaled_dot_product_attention(
+                query=q, key=k, value=v, dropout_p=self.attn_drop.p, scale=self.scale
             )
-            x = self.proj(x)
-            x = self.proj_drop(x)
-            return x
+            .transpose(1, 2)
+            .reshape(B, Nq, C)
+        )
+
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
 
 
 class DecoderBlock(nn.Module):
@@ -329,39 +309,12 @@ class DecoderBlock(nn.Module):
         )
         self.norm_y = norm_layer(dim) if norm_mem else nn.Identity()
 
-    def forward(self, x, y, xpos, ypos, return_attn=False, n_query_suffix=0, n_cross_kv_suffix_exclude=0, inject_before_attn=None, n_inject_suffix=0):
-        is_film = isinstance(inject_before_attn, tuple)
-
-        # Additive injection: before LayerNorm (original behavior)
-        if inject_before_attn is not None and n_inject_suffix > 0 and not is_film:
-            prefix = x[:, :-n_inject_suffix]
-            suffix = x[:, -n_inject_suffix:]
-            suffix = suffix + inject_before_attn
-            x = torch.cat([prefix, suffix], dim=1)
-
-        normed_x = self.norm1(x)
-
-        # FiLM injection: after LayerNorm, before attention (bypasses LN compression)
-        if inject_before_attn is not None and n_inject_suffix > 0 and is_film:
-            gamma, beta = inject_before_attn
-            prefix = normed_x[:, :-n_inject_suffix]
-            suffix = (1 + gamma) * normed_x[:, -n_inject_suffix:] + beta
-            normed_x = torch.cat([prefix, suffix], dim=1)
-
-        if return_attn:
-            self_attn_output, self_attn = self.attn(normed_x, xpos, return_attn=True, n_query_suffix=n_query_suffix)
-            x = x + self.drop_path(self_attn_output)
-            y_ = self.norm_y(y)
-            cross_attn_output, cross_attn = self.cross_attn(self.norm2(x), y_, y_, xpos, ypos, return_attn=True, n_kv_suffix_exclude=n_cross_kv_suffix_exclude)
-            x = x + self.drop_path(cross_attn_output)
-            x = x + self.drop_path(self.mlp(self.norm3(x)))
-            return x, y, self_attn, cross_attn
-        else:
-            x = x + self.drop_path(self.attn(normed_x, xpos, n_query_suffix=n_query_suffix))
-            y_ = self.norm_y(y)
-            x = x + self.drop_path(self.cross_attn(self.norm2(x), y_, y_, xpos, ypos, n_kv_suffix_exclude=n_cross_kv_suffix_exclude))
-            x = x + self.drop_path(self.mlp(self.norm3(x)))
-            return x, y, None, None
+    def forward(self, x, y, xpos, ypos, n_query_suffix=0, n_cross_kv_suffix_exclude=0):
+        x = x + self.drop_path(self.attn(self.norm1(x), xpos, n_query_suffix=n_query_suffix))
+        y_ = self.norm_y(y)
+        x = x + self.drop_path(self.cross_attn(self.norm2(x), y_, y_, xpos, ypos, n_kv_suffix_exclude=n_cross_kv_suffix_exclude))
+        x = x + self.drop_path(self.mlp(self.norm3(x)))
+        return x, y
 
 
 class CustomDecoderBlock(nn.Module):
