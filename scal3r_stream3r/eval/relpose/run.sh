@@ -13,6 +13,25 @@ workdir='.'
 MASTER_PORT=$(python -c 'import socket; s=socket.socket(); s.bind(("", 0)); print(s.getsockname()[1]); s.close()')
 
 # ============================================================
+# Environment fixes (REQUIRED for PGO + loop closure)
+# ------------------------------------------------------------
+# 1) gtsam (iSAM2 PGO) only imports if conda's libstdc++ (providing
+#    CXXABI_1.3.15) is preloaded. Without this, gtsam import fails and PGO is
+#    *silently* disabled -> the trajectory falls back to the raw chain and ATE
+#    degrades a lot on drifty scenes (e.g. Sintel 0.157 -> ~0.30).
+# 2) Loop closure loads a VGGT-Long VPR model through pytorch_lightning, which
+#    needs pkg_resources (setuptools<71) and an importable wandb. A pinned wandb
+#    can ship a broken protobuf; removing it lets PL skip the wandb logger.
+# ============================================================
+if [ -n "${CONDA_PREFIX:-}" ] && [ -f "${CONDA_PREFIX}/lib/libstdc++.so.6" ]; then
+    export LD_PRELOAD="${CONDA_PREFIX}/lib/libstdc++.so.6${LD_PRELOAD:+:${LD_PRELOAD}}"
+fi
+pip install -q 'setuptools<71' >/dev/null 2>&1 || true
+pip uninstall -y wandb >/dev/null 2>&1 || true
+python -c "import gtsam" 2>/dev/null && echo "[env] gtsam import OK -> PGO enabled" \
+    || echo "[env] WARNING: gtsam import FAILED -> PGO disabled (check LD_PRELOAD / libstdc++)"
+
+# ============================================================
 # Model weights
 # ============================================================
 # Scal3R model weights

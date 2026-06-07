@@ -34,16 +34,17 @@ class STream3R(nn.Module, PyTorchModelHubMixin):
         use_rel_pose_prompt: bool = False,
         num_rel_pose_tokens: int = 4,  # learnable base token count (fixed at training)
         max_ref_frames: int = 4,       # buffer window size (can override at inference)
-        ref_feat_type: str = "img_feat",  # "img_feat" or "camera_token"
-        rel_pose_global_only: bool = False,  # only use global-path features for rel_pose decoder
         use_align_scale: bool = False,  # CUT3R-style pts3d scale alignment for rel_pose loss
     ):
         super().__init__()
 
         self.use_rel_pose_prompt = use_rel_pose_prompt
         self.patch_size = patch_size
-        self.ref_feat_type = ref_feat_type
         self.use_align_scale = use_align_scale
+        # Buffer-window cap (reference-count limit). Lives here, not in the aggregator's
+        # attention/assemble logic: it is applied by the buffer-management layer
+        # (per-frame training loop + StreamSession at inference), mirroring CUT3R.
+        self.max_ref_frames = max_ref_frames
 
         self.aggregator = STreamAggregator(
             img_size=img_size,
@@ -51,14 +52,10 @@ class STream3R(nn.Module, PyTorchModelHubMixin):
             embed_dim=embed_dim,
             use_rel_pose_prompt=use_rel_pose_prompt,
             num_rel_pose_tokens=num_rel_pose_tokens,
-            max_ref_frames=max_ref_frames,
-            ref_feat_type=ref_feat_type,
-            rel_pose_global_only=rel_pose_global_only,
         )
         self.camera_head = CameraHead(
             dim_in=2 * embed_dim,
             use_rel_pose_prompt=use_rel_pose_prompt,
-            rel_pose_global_only=rel_pose_global_only,
         )
         self.point_head = DPTHead(dim_in=2 * embed_dim, output_dim=4, activation="inv_log", conf_activation="expp1")
         self.depth_head = DPTHead(dim_in=2 * embed_dim, output_dim=2, activation="exp", conf_activation="expp1")
@@ -112,12 +109,8 @@ class STream3R(nn.Module, PyTorchModelHubMixin):
             }
             freeze_all_params(to_be_frozen[freeze])
 
-    def _get_pose_buffer_entry(self, frame_idx, global_img_feat):
-        """CUT3R model.py:866 — img_feat mode."""
-        return (frame_idx, global_img_feat.detach())
-
     def _forward_per_frame_training(self, images: torch.Tensor, mode: str = "causal"):
-        """Per-frame loop training for camera_token ref_feat_type.
+        """Per-frame loop training for relative pose prompt (camera-token references).
 
         Mirrors StreamSession.forward_stream() but accumulates all frame
         predictions into batch tensors for loss computation.  Camera tokens
@@ -126,7 +119,7 @@ class STream3R(nn.Module, PyTorchModelHubMixin):
         """
         B, S, C_in, H, W = images.shape
         device = images.device
-        K_max = self.aggregator.max_ref_frames
+        K_max = self.max_ref_frames
 
         # Initialize KV caches (same structure as StreamSession._clear_cache)
         agg_kv = [[None, None] for _ in range(self.aggregator.depth)]
@@ -228,9 +221,10 @@ class STream3R(nn.Module, PyTorchModelHubMixin):
 
             # --- Store camera token in buffer for next frame ---
             cam_tok = agg_tokens_list[-1][:, 0, 0, :]  # [B, 2C]
-            if self.aggregator.rel_pose_global_only:
-                cam_tok = cam_tok[:, cam_tok.shape[-1] // 2:]  # [B, C] global half only
             pose_token_buffer.append((frame_idx, cam_tok.detach()))
+            # Cap buffer to K_max most-recent refs (cap lives in the buffer-management
+            # layer, not the aggregator assemble; behaviorally a no-op when S <= K_max+1)
+            pose_token_buffer = pose_token_buffer[-K_max:]
 
         # --- Assemble batch predictions ---
         predictions = {}
@@ -250,7 +244,7 @@ class STream3R(nn.Module, PyTorchModelHubMixin):
             'valid_mask': torch.cat(all_valid_mask, dim=1),   # [B, S, K_max]
         }
 
-        # Pass rel_pose_info (with global_img_feat) for loss scale computation
+        # Pass rel_pose_info for loss scale computation
         if all_rel_pose_info:
             predictions['_rel_pose_info'] = all_rel_pose_info
 
@@ -288,7 +282,7 @@ class STream3R(nn.Module, PyTorchModelHubMixin):
         # camera_token ref features come from aggregator output (2C dim), which requires
         # sequential per-frame processing to feed previous frames' camera tokens as ref features.
         # Streaming inference (aggregator_kv_cache_list != None) handles this via pose_token_buffer.
-        if self.ref_feat_type == "camera_token" and aggregator_kv_cache_list is None:
+        if self.use_rel_pose_prompt and aggregator_kv_cache_list is None:
             return self._forward_per_frame_training(images, mode)
 
         # Aggregator forward
@@ -303,10 +297,8 @@ class STream3R(nn.Module, PyTorchModelHubMixin):
         predictions = {}
 
         # Pass camera token through rel_pose_info for streaming inference buffer
-        if self.ref_feat_type == "camera_token" and self.use_rel_pose_prompt:
+        if self.use_rel_pose_prompt:
             cam_tok = aggregated_tokens_list[-1][:, :, 0, :]  # [B, S, 2C]
-            if self.aggregator.rel_pose_global_only:
-                cam_tok = cam_tok[:, :, cam_tok.shape[-1] // 2:]  # [B, S, C] global half only
             rel_pose_info['camera_token'] = cam_tok
 
         # Pass through rel_pose_info for loss computation

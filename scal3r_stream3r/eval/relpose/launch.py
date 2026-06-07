@@ -570,28 +570,26 @@ def main():
             config = {}
 
         # Build model config: checkpoint config > CLI override > defaults
+        # NOTE: ref_feat_type / rel_pose_global_only are no longer model params
+        # (the model is locked to camera_token + concat). The CLI flags are kept
+        # for backward-compatible invocation but are not passed to the model.
         use_rel_pose = config.get('use_rel_pose_prompt', args.use_rel_pose)
         num_rel_pose_tokens = config.get('num_rel_pose_tokens', 4)
-        ref_feat_type = config.get('ref_feat_type', getattr(args, 'ref_feat_type', 'img_feat'))
-        rel_pose_global_only = config.get('rel_pose_global_only', getattr(args, 'rel_pose_global_only', False))
 
         model = STream3R(
             use_rel_pose_prompt=use_rel_pose,
             num_rel_pose_tokens=num_rel_pose_tokens,
-            ref_feat_type=ref_feat_type,
-            rel_pose_global_only=rel_pose_global_only,
         )
         missing_keys, unexpected_keys = model.load_state_dict(checkpoint, strict=False)
         print(f"Loaded pretrained from {args.pretrained}")
-        print(f"  use_rel_pose={use_rel_pose}, num_rel_pose_tokens={num_rel_pose_tokens}, "
-              f"ref_feat_type={ref_feat_type}, rel_pose_global_only={rel_pose_global_only}")
+        print(f"  use_rel_pose={use_rel_pose}, num_rel_pose_tokens={num_rel_pose_tokens}")
         if missing_keys:
             print(f"Missing keys: {missing_keys}")
         if unexpected_keys:
             print(f"Unexpected keys: {unexpected_keys}")
-        # Override max_ref_frames at inference time (CUT3R: model.max_ref_frames = args.max_ref_frames)
+        # Override max_ref_frames at inference time (buffer-window cap; CUT3R-style)
         if args.use_rel_pose:
-            model.aggregator.max_ref_frames = args.max_ref_frames
+            model.max_ref_frames = args.max_ref_frames
             print(f"Inference max_ref_frames={args.max_ref_frames}")
         model = model.to(args.device)
     else:

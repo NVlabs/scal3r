@@ -20,7 +20,6 @@ class StreamSession:
     def __init__(self, model: STream3R, mode: str, use_pgo: bool = False, pgo_config: dict = None):
         self.model = model
         self.mode = mode
-        self.ref_feat_type = getattr(model.aggregator, 'ref_feat_type', 'img_feat')
         self.aggregator_kv_cache_depth = model.aggregator.depth
         self.camera_head_kv_cache_depth = model.camera_head.trunk_depth
         self.camera_head_iterations = 4
@@ -144,11 +143,6 @@ class StreamSession:
         if hasattr(self.on_frame_processed, 'finalize'):
             self.on_frame_processed.finalize(self.pgo_results)
 
-        # Debug: check what keys are in results
-        keys_in_first = list(self.pgo_results[0].keys()) if self.pgo_results else []
-        keys_in_last = list(self.pgo_results[-1].keys()) if self.pgo_results else []
-        print(f"[get_pgo_poses] n_results={len(self.pgo_results)}, first_keys={keys_in_first}, last_keys={keys_in_last}")
-
         poses = []
         for result in self.pgo_results:
             if 'kf_pgo_c2w' in result:
@@ -208,27 +202,25 @@ class StreamSession:
         if self.use_pgo and hasattr(self, 'ref_frame_indices_fn') and self.ref_frame_indices_fn is not None:
             self.ref_frame_indices_fn(self.frame_count, self.pose_token_buffer)
 
+        # Cap reference count to max_ref_frames here (buffer-management layer),
+        # so the model's assemble stays cap-agnostic (mirrors CUT3R).
+        capped_buffer = self.pose_token_buffer[-self.model.max_ref_frames:]
         outputs = self.model(
             images=images,
             mode=self.mode,
             aggregator_kv_cache_list=aggregator_kv_cache_list,
             camera_head_kv_cache_list=camera_head_kv_cache_list,
-            pose_token_buffer=self.pose_token_buffer,
+            pose_token_buffer=capped_buffer,
         )
 
         self._update_predictions(outputs)
 
         # Update pose_token_buffer (CUT3R: pose_token_buffer.append(_get_pose_buffer_entry(...)))
         rel_pose_info = outputs.get('_rel_pose_info', {})
-        if self.ref_feat_type == "camera_token" and 'camera_token' in rel_pose_info:
-            # camera_token is [B, S, 2C] (or [B, S, C] if rel_pose_global_only), take last frame
+        if 'camera_token' in rel_pose_info:
+            # camera_token is [B, S, 2C], take last frame as the reference feature
             self.pose_token_buffer.append(
                 self._get_pose_buffer_entry(self.frame_count, rel_pose_info['camera_token'][:, -1:])
-            )
-        elif 'global_img_feat' in rel_pose_info:
-            # global_img_feat is [B, S, C], take last frame
-            self.pose_token_buffer.append(
-                self._get_pose_buffer_entry(self.frame_count, rel_pose_info['global_img_feat'][:, -1:])
             )
 
         # PGO: on_frame_processed callback (CUT3R inference.py:677)

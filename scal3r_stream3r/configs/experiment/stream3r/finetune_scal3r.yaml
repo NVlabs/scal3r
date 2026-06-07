@@ -1,3 +1,4 @@
+# @package _global_
 # Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
 #
 # NVIDIA CORPORATION and its licensors retain all intellectual property
@@ -6,7 +7,6 @@
 # distribution of this software and related documentation without an express
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
-# @package _global_
 # Experiment config for training relative pose prompt on STream3R
 # This config freezes the base model and only trains:
 #   - rel_pose_token (in aggregator)
@@ -14,10 +14,11 @@
 
 defaults:
   - /experiment/stream3r/stream3r
+  - _self_   # apply THIS file's keys last so they override the base experiment
 
 tags: ["train", "stream3r", "rel_pose_prompt"]
 
-task_name: stream3r_rel_pose
+task_name: finetune_scal3r
 
 slurm_job_id: 99999  # must set in the command line
 
@@ -58,6 +59,7 @@ data:
     batch_size_per_device_val: 8
     train_datasets:
       - 4000 @ TartanAirWds_Multi(allow_repeat=${data.allow_repeat}, split=None, ROOT="${data.data_root}/processed_tartanair_wds_v2cc/", aug_crop=16, resolution=${data.resolution}, transform=SeqColorJitter, num_views=${data.num_views}, n_corres=${data.n_corres_train})
+    validation_datasets: []   # validation disabled (trainer.limit_val_batches=0)
 
 model:
   pretrained: weights/stream3r/model.pt
@@ -70,9 +72,7 @@ model:
     use_rel_pose_prompt: true
     num_rel_pose_tokens: 1   # learnable base token count
     max_ref_frames: 4        # buffer window size (can override at inference)
-    ref_feat_type: "camera_token"  # "img_feat" (mean-pooled encoder features) or "camera_token" (aggregator camera token)
-    rel_pose_global_only: false  # true: only use global-path (1024d) for rel_pose decoder; false: use concat (2048d)
-    use_align_scale: false  # true: CUT3R-style pts3d scale alignment; false: depth-based normalization
+    use_align_scale: true  # true: CUT3R-style pts3d scale alignment; false: depth-based normalization
     freeze: "rel_pose_prompt"  # Freeze all except rel_pose_token, prev_pose_proj, rel_pose_decoder
 
   train_criterion:
@@ -87,7 +87,7 @@ model:
     use_rel_pose_loss: true
     rel_pose_loss_weight: 1.0
     rel_rot_loss_weight: 1.0
-    use_align_scale: false
+    use_align_scale: true
 
   validation_criterion:
     _target_: stream3r.loss.losses.CausalLoss

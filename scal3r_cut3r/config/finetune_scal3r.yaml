@@ -97,7 +97,7 @@ print_freq: 100
 print_img_freq: 300
 num_imgs_vis: 4
 save_dir: 'checkpoints'
-exp_name: 'scal3r_stage1'
+exp_name: 'finetune_scal3r'
 task: 'cut3r'
 logdir: ./${save_dir}/${exp_name}/logs
 output_dir: ./${save_dir}/${exp_name}/

@@ -79,7 +79,6 @@ class CameraHead(nn.Module):
         # Relative pose prompt parameters
         use_rel_pose_prompt: bool = False,
         num_rel_pose_tokens: int = 8,
-        rel_pose_global_only: bool = False,
     ):
         super().__init__()
 
@@ -88,12 +87,10 @@ class CameraHead(nn.Module):
         else:
             raise ValueError(f"Unsupported camera encoding type: {pose_encoding_type}")
 
-        # CUT3R-style per-token MLP decoder
+        # CUT3R-style per-token MLP decoder (rel_pose tokens use the full concat dim)
         self.use_rel_pose_prompt = use_rel_pose_prompt
-        self.rel_pose_global_only = rel_pose_global_only
         if use_rel_pose_prompt:
-            decoder_dim = dim_in // 2 if rel_pose_global_only else dim_in
-            self.rel_pose_decoder = RelativePoseDecoder(dim_in=decoder_dim)
+            self.rel_pose_decoder = RelativePoseDecoder(dim_in=dim_in)
         else:
             self.rel_pose_decoder = None
 
@@ -196,12 +193,7 @@ class CameraHead(nn.Module):
         # Extract rel_pose_tokens if enabled (at the end of token sequence)
         rel_pose_tokens = None
         if self.use_rel_pose_prompt and num_rel_pose_tokens > 0:
-            if self.rel_pose_global_only:
-                # Only use global-path features (last half of concat dim)
-                C_half = tokens.shape[-1] // 2
-                rel_pose_tokens = tokens[:, :, -num_rel_pose_tokens:, C_half:]  # [B, S, K, C/2]
-            else:
-                rel_pose_tokens = tokens[:, :, -num_rel_pose_tokens:]  # [B, S, K, C]
+            rel_pose_tokens = tokens[:, :, -num_rel_pose_tokens:]  # [B, S, K, C]
 
         pose_tokens = self.token_norm(pose_tokens)
 

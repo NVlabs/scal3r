@@ -30,7 +30,6 @@ from stream3r.dust3r.utils.geometry import (
 )
 from stream3r.loss.utils import (
     camera_loss, point_loss, depth_loss,
-    relative_pose_loss, compute_gt_relative_pose,
     _compute_relative_poses_window, compute_relative_pose_token_loss,
 )
 

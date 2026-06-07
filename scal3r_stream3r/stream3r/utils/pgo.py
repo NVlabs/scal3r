@@ -574,38 +574,13 @@ def make_kf_only_callbacks(**params):
                         real_gap = abs(frame_idx - ref_idx)
                         ss = loop_sigma_scale / max(real_gap / 100.0, 1.0) ** 0.5
                         forced_gap = 1
-                        # Debug
-                        trans = T_rel[:3, 3].norm().item()
-                        R = T_rel[:3, :3]
-                        cos_a = ((R.trace() - 1) / 2).clamp(-1, 1)
-                        rot_deg = cos_a.acos().item() * 180 / 3.14159265
-                        print(f"  Loop edge T_rel: frame {frame_idx} <-> {ref_idx}, "
-                              f"trans={trans:.2f}m, rot={rot_deg:.1f}deg, ss={ss:.4f}")
                         _constraint_buffer.append(
                             (frame_idx, ref_idx, T_rel.clone(), ss, forced_gap, True))
                         if _isam2_pgo is not None:
-                            # Debug: pose before loop edge
-                            pose_ref_before = _isam2_pgo.get_pose(ref_idx)
-                            pose_curr_before = _isam2_pgo.get_pose(frame_idx)
                             _isam2_pgo.add_constraint(
                                 frame_idx, ref_idx, T_rel,
                                 sigma_scale=ss, forced_gap=forced_gap, is_loop=True)
-                            # Immediately optimize and check effect
                             _isam2_pgo.optimize()
-                            pose_ref_after = _isam2_pgo.get_pose(ref_idx)
-                            pose_curr_after = _isam2_pgo.get_pose(frame_idx)
-                            if pose_ref_before is not None and pose_ref_after is not None:
-                                ref_shift = (pose_ref_before - pose_ref_after).abs().max().item()
-                            else:
-                                ref_shift = -1
-                            if pose_curr_before is not None and pose_curr_after is not None:
-                                curr_shift = (pose_curr_before - pose_curr_after).abs().max().item()
-                            else:
-                                curr_shift = -1
-                            n_keys = len(_isam2_pgo._added_keys)
-                            print(f"  [Loop PGO debug] ref={ref_idx} shift={ref_shift:.6f}, "
-                                  f"curr={frame_idx} shift={curr_shift:.6f}, "
-                                  f"n_keys={n_keys}, broken={_isam2_pgo.is_broken}")
                         continue
 
                     # Normal sequential edges
@@ -727,13 +702,6 @@ def make_kf_only_callbacks(**params):
         _t1 = _time.perf_counter()
         result['chain_c2w'] = chain_c2w
         result['online_pgo_c2w'] = pgo_c2w
-        if _debug_counter[0] < 5:
-            diff = (chain_c2w - pgo_c2w).abs().max().item() if chain_c2w is not None and pgo_c2w is not None else -1
-            has_rel = 'relative_poses' in result
-            ref_list = result.get('ref_frame_indices', [])
-            print(f"[PGO-DBG] frame={frame_idx} has_rel={has_rel} n_refs={len(ref_list)} "
-                  f"chain_pgo_diff={diff:.6f} isam2_broken={_isam2_pgo.is_broken if _isam2_pgo else 'N/A'}")
-            _debug_counter[0] += 1
         c2w = pgo_c2w
 
         _t2 = _time.perf_counter()
@@ -782,37 +750,13 @@ def make_kf_only_callbacks(**params):
             for loop_idx, score in loops:
                 if loop_idx in _kf_feature_archive:
                     _pending_loop_frames.append((loop_idx, score))
-                    print(f"  Loop candidate: frame {frame_idx} <-> {loop_idx} "
-                          f"(score={score:.3f})")
 
         # Reset loop flag
         if _has_loop_edges[0]:
             _has_loop_edges[0] = False
 
     def _print_kf_stats():
-        n_total = _total_frames[0]
-        n_kf = len(keyframe_indices)
-        print(f"[PGO-KF] total_frames={n_total}, keyframes={n_kf}, non_keyframes={n_total - n_kf}, "
-              f"kf_ratio={n_kf/n_total*100:.1f}%, kf_indices={sorted(keyframe_indices)}")
-        # Fine-grained KF selection breakdown
-        print(f"\n  KF Selection Breakdown (ms/frame, {n_total} frames):")
-        for name, times in _kf_timers.items():
-            if times:
-                total = sum(times) * 1000
-                avg = total / n_total
-                print(f"    {name:<20} {total:>8.1f}ms total  {avg:>6.2f}ms/f  ({len(times)} calls)")
-        # overlap_query sub-breakdown
-        if _query_timers['tree_query']:
-            n_q = len(_query_timers['tree_query'])
-            print(f"\n  Overlap Query Sub-breakdown ({n_q} calls):")
-            for name in ['rebuild', 'quadrant_id', 'sort', 'tree_query']:
-                times = _query_timers[name]
-                total = sum(times) * 1000
-                avg = total / n_q
-                print(f"    {name:<20} {total:>8.1f}ms total  {avg:>6.2f}ms/call")
-            avg_qpts = sum(_query_timers['n_query_pts']) / n_q
-            avg_tpts = sum(_query_timers['n_tree_pts']) / n_q
-            print(f"    avg query pts: {avg_qpts:.0f},  avg tree pts: {avg_tpts:.0f}")
+        pass
     on_frame_processed.print_kf_stats = _print_kf_stats
 
     # Global LM PGO (matches CUT3R _run_global_pgo)
@@ -894,7 +838,6 @@ def make_kf_only_callbacks(**params):
             lm_params.setAbsoluteErrorTol(1e-8)
             optimizer = gtsam.LevenbergMarquardtOptimizer(graph, initial, lm_params)
             estimate = optimizer.optimize()
-            print(f"  LM converged: {optimizer.iterations()} iterations, error={optimizer.error():.4f}")
         except Exception as e:
             print(f"  Global LM failed: {type(e).__name__}: {e}")
             return None
