@@ -14,11 +14,11 @@ n_corres_test: 0
 # Available switches in ConfLoss:
 #   use_pts_loss: Confidence-weighted point cloud loss (default: True)
 #   use_pose_loss: Absolute camera pose loss (default: False)
-#   use_relative_pose_loss: Relative pose token loss (default: True)
-#   rot_loss_weight: Weight for rotation loss (default: 10.0, increase if rotation is not learning well)
-#   trans_loss_weight: Weight for translation loss (default: 1.0, increase for small-scale datasets like TartanAir)
+#   use_rel_pose_loss: Relative pose token loss (default: True)
+#   rel_rot_loss_weight: Weight for rotation loss (default: 10.0, increase if rotation is not learning well)
+#   rel_trans_loss_weight: Weight for translation loss (default: 1.0, increase for small-scale datasets like TartanAir)
 # Disabled losses are NOT computed, improving training speed
-train_criterion: ConfLoss(Regr3DPoseBatchList(L21, norm_mode='?avg_dis', use_pts_loss=False, use_pose_loss=False, use_relative_pose_loss=True, rot_loss_weight=1.0, trans_loss_weight=1.0, use_align_scale=True), alpha=0.2)
+train_criterion: ConfLoss(Regr3DPoseBatchList(L21, norm_mode='?avg_dis', use_pts_loss=False, use_pose_loss=False, use_rel_pose_loss=True, rel_rot_loss_weight=1.0, rel_trans_loss_weight=1.0, use_align_scale=True), alpha=0.2)
 test_criterion: Regr3DPose(L21, norm_mode='?avg_dis', gt_scale=False, sky_loss_value=0) + Regr3DPose_ScaleInv(L21, norm_mode='?avg_dis', gt_scale=False, sky_loss_value=0)
 
 resolution: [(512, 384), (512, 336), (512, 288), (512, 256), (512, 208), (512, 144), (384, 512), (336, 512), (288, 512), (256, 512)]

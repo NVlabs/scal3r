@@ -118,7 +118,8 @@ def main(args):
         model = ARCroco3DStereo.from_pretrained(args.weights).to(device)
         model.eval()
 
-        from dust3r.inference import inference_recurrent, make_kf_only_callbacks, accumulate_poses
+        from dust3r.inference import inference_recurrent
+        from dust3r.utils.pgo import make_kf_only_callbacks, accumulate_poses
     else:
         raise NotImplementedError
     os.makedirs(args.output_dir, exist_ok=True)

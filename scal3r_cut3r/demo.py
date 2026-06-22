@@ -755,7 +755,7 @@ def run_inference(args):
     # Loop closure detector
     loop_detector = None
     if getattr(args, 'loop_closure', False):
-        from src.dust3r.loop_closure import OnlineLoopDetector
+        from dust3r.utils.loop_closure import OnlineLoopDetector
         loop_detector = OnlineLoopDetector(
             device=device,
             similarity_threshold=args.loop_similarity_threshold,

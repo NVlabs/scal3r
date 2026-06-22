@@ -48,9 +48,8 @@ from dust3r.blocks import (
 
 inf = float("inf")
 from accelerate.logging import get_logger
-from einops import rearrange
 
-printer = get_logger(__name__, log_level="INFO")
+printer = get_logger(__name__, log_level="DEBUG")
 
 
 @dataclass
@@ -246,16 +245,11 @@ class ARCroco3DStereo(CroCoNet):
         config.croco_kwargs = fill_default_args(
             config.croco_kwargs, CrocoConfig.__init__
         )
+        self.config = config
         self.patch_embed_cls = config.patch_embed_cls
-        # Drop any legacy/unknown kwargs (e.g. removed ablation flags carried by
-        # old checkpoints) so CrocoConfig only receives parameters it accepts.
-        import inspect
-        _croco_params = set(inspect.signature(CrocoConfig.__init__).parameters)
-        self.croco_args = {k: v for k, v in config.croco_kwargs.items() if k in _croco_params}
+        self.croco_args = config.croco_kwargs
         croco_cfg = CrocoConfig(**self.croco_args)
         super().__init__(croco_cfg)
-        # Restore config after super().__init__ overwrites it with CrocoConfig
-        self.config = config
         self.enc_blocks_ray_map = nn.ModuleList(
             [
                 Block(
@@ -296,7 +290,7 @@ class ARCroco3DStereo(CroCoNet):
         self.masked_ray_map_token = nn.Parameter(
             torch.randn(1, self.enc_embed_dim) * 0.02, requires_grad=True
         )
-        self.relative_pose_token = nn.Parameter(
+        self.rel_pose_token = nn.Parameter(
             torch.randn(1, config.num_prompt_tokens, self.dec_embed_dim) * 0.02, requires_grad=True
         )
         # Project reference frame decoder features into the pose-token space
@@ -332,12 +326,10 @@ class ARCroco3DStereo(CroCoNet):
         )
         self.set_freeze(config.freeze)
 
-
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, **kw):
         if os.path.isfile(pretrained_model_name_or_path):
-            model = load_model(pretrained_model_name_or_path, device="cpu")
-            return model
+            return load_model(pretrained_model_name_or_path, device="cpu")
         else:
             try:
                 model = super(ARCroco3DStereo, cls).from_pretrained(
@@ -525,10 +517,7 @@ class ARCroco3DStereo(CroCoNet):
                 self.downstream_head.pose_head,
             ],
         }
-        if freeze == "encoder_and_decoder_and_head":
-            freeze_all_params(to_be_frozen["encoder_and_decoder_and_head"]) # requires_grad = False
-        else:
-            freeze_all_params(to_be_frozen[freeze])
+        freeze_all_params(to_be_frozen[freeze])
 
     def _set_prediction_head(self, *args, **kwargs):
         """No prediction head"""
@@ -742,16 +731,14 @@ class ARCroco3DStereo(CroCoNet):
             else:
                 f_img = torch.cat([f_pose, f_img], dim=1)
                 pos_img = torch.cat([pos_pose, pos_img], dim=1)
-
+        
         final_output.append((f_state, f_img))
-
         for blk_state, blk_img in zip(self.dec_blocks_state, self.dec_blocks):
             if (
                 self.gradient_checkpointing
                 and self.training
                 and torch.is_grad_enabled()
             ):
-                # Pass parameters as positional arguments for gradient checkpointing compatibility
                 f_state, _ = checkpoint(
                     blk_state,
                     *final_output[-1][::+1],
@@ -880,14 +867,14 @@ class ARCroco3DStereo(CroCoNet):
             ref_feats = ref_feats[::-1]
 
         # Per-reference learnable base tokens + projected reference features
-        n_base = self.relative_pose_token.shape[1]  # number of distinct base tokens
+        n_base = self.rel_pose_token.shape[1]  # number of distinct base tokens
         if n_actual <= n_base:
             # Each reference k uses its own base token k
-            rel_pose_feat = self.relative_pose_token[:, :n_actual, :].expand(B, -1, -1).clone()
+            rel_pose_feat = self.rel_pose_token[:, :n_actual, :].expand(B, -1, -1).clone()
         else:
             # Use all base tokens, then repeat the last one for extras
-            base_part = self.relative_pose_token.expand(B, -1, -1).clone()
-            extra = self.relative_pose_token[:, -1:, :].expand(B, n_actual - n_base, -1).clone()
+            base_part = self.rel_pose_token.expand(B, -1, -1).clone()
+            extra = self.rel_pose_token[:, -1:, :].expand(B, n_actual - n_base, -1).clone()
             rel_pose_feat = torch.cat([base_part, extra], dim=1)
 
         # Project reference features and inject into tokens
@@ -1024,26 +1011,15 @@ class ARCroco3DStereo(CroCoNet):
         return res, (state_feat, mem), pose_token_buffer
 
     def _forward_impl(self, views, ret_state=False):
-        # Encoder and state init use only frozen parameters — skip gradient tracking
-        # to save memory and compute (same pattern as TBPTT path in inference.py)
-        with torch.no_grad():
-            shape, feat_ls, pos = self._encode_views(views)
-            feat_raw = feat_ls[-1]
-            state_feat, state_pos = self._init_state(feat_raw[0], pos[0])
-            mem = self.pose_retriever.mem.expand(feat_raw[0].shape[0], -1, -1)
-        # Detach all encoder outputs to cut the graph at the encoder-decoder boundary
-        feat = [f.detach() for f in feat_raw]
-        pos = [p.detach() for p in pos]
-        shape = [s.detach() for s in shape]
-        state_feat = state_feat.detach()
-        state_pos = state_pos.detach()
-        mem = mem.detach()
+        shape, feat_ls, pos = self._encode_views(views)
+        feat = feat_ls[-1]
+        state_feat, state_pos = self._init_state(feat[0], pos[0])
+        mem = self.pose_retriever.mem.expand(feat[0].shape[0], -1, -1)
         init_state_feat = state_feat.clone()
         init_mem = mem.clone()
         all_state_args = [(state_feat, state_pos, init_state_feat, mem, init_mem)]
         ress = []
-
-        pose_token_buffer = []  # Sliding window buffer for pose tokens: List[Tuple[int, Tensor]]
+        pose_token_buffer = []
 
         for i in range(len(views)):
             feat_i = feat[i]
@@ -1069,9 +1045,7 @@ class ARCroco3DStereo(CroCoNet):
                 rel_pose_pos_i = None
                 n_actual = 0
                 ref_indices = []
-    
-
-
+            
             new_state_feat, dec = self._recurrent_rollout(
                 state_feat,
                 state_pos,
@@ -1127,13 +1101,12 @@ class ARCroco3DStereo(CroCoNet):
             else:
                 update_mask = img_mask
             update_mask = update_mask[:, None, None].float()
-
             state_feat = new_state_feat * update_mask + state_feat * (
                 1 - update_mask
             )  # update global state
             mem = new_mem * update_mask + mem * (
                 1 - update_mask
-            )  # then update local state (always full update for mem)
+            )  # then update local state
             reset_mask = views[i]["reset"]
             if reset_mask is not None:
                 reset_mask = reset_mask[:, None, None].float()
@@ -1186,7 +1159,6 @@ class ARCroco3DStereo(CroCoNet):
 
         feat_i = feat_ls[-1]
         pos_i = pos
-
         if self.pose_head_flag:
             global_img_feat_i = self._get_img_level_feat(feat_i)
             pose_feat_i = self.pose_retriever.inquire(global_img_feat_i, mem)
@@ -1270,6 +1242,8 @@ class ARCroco3DStereo(CroCoNet):
         pose_token_buffer = []  # Sliding window buffer: List[Tuple[int, Tensor]]
         # Process views one at a time to save GPU memory
         for i, cpu_view in enumerate(views):
+            print(f"Processing view {i + 1}/{len(views)} - GPU memory management active")
+            
             # Move current view to GPU
             view = {}
             ignore_keys = set(["depthmap", "dataset", "label", "instance", "idx", "true_shape", "rng"])
@@ -1336,7 +1310,6 @@ class ARCroco3DStereo(CroCoNet):
             else:
                 raise NotImplementedError
 
-
             if i == 0:
                 state_feat, state_pos = self._init_state(feat_i, pos_i)
                 mem = self.pose_retriever.mem.expand(feat_i.shape[0], -1, -1)
@@ -1388,12 +1361,12 @@ class ARCroco3DStereo(CroCoNet):
                 reset_mask=view["reset"],
                 update=view.get("update", None),
             )
-
+            
             out_pose_feat_i = dec[-1][:, 0:1]
             new_mem = self.pose_retriever.update_mem(
                 mem, global_img_feat_i, out_pose_feat_i
             )
-
+            
             assert len(dec) == self.dec_depth + 1
 
             # Build head input and extract rel_pose_token
@@ -1438,7 +1411,7 @@ class ARCroco3DStereo(CroCoNet):
                 else:
                     res_cpu[key] = value
             ress.append(res_cpu)
-
+            
             # Create minimal processed view (keep only essential data on CPU)
             processed_view = {
                 "img": view["img"].cpu(),
@@ -1447,19 +1420,16 @@ class ARCroco3DStereo(CroCoNet):
                 "reset": view.get("reset", torch.tensor(False).unsqueeze(0)).cpu(),
             }
             processed_views.append(processed_view)
-
+            
             img_mask = view["img_mask"]
             update = view.get("update", None)
             if update is not None:
                 update_mask = img_mask & update
             else:
                 update_mask = img_mask
-
+                
             update_mask = update_mask[:, None, None].float()
 
-            # Selective state update: only keyframes write back to state/mem.
-            # Non-keyframe frames are read-only (MUSt3R-style).
-            # When keyframe_indices is None (no keyframe selection), always update.
             if keyframe_indices is None or i in keyframe_indices:
                 state_feat = new_state_feat * update_mask + state_feat * (1 - update_mask)
                 mem = new_mem * update_mask + mem * (1 - update_mask)
@@ -1484,7 +1454,7 @@ class ARCroco3DStereo(CroCoNet):
                 all_state_args.append(
                     (state_feat.cpu(), state_pos.cpu(), init_state_feat.cpu(), mem.cpu(), init_mem.cpu())
                 )
-
+            
             # Explicit cleanup
             del view, imgs, ray_maps, img_out, ray_out, feat_i, pos_i, res
             del new_state_feat, dec, head_input

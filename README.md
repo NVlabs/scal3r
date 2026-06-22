@@ -35,10 +35,17 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 pip install -r requirements.txt
 
 # Compile RoPE CUDA kernels (CroCo v2)
+# Builds for the local GPU's arch by default; override for a specific arch with
+# e.g. TORCH_CUDA_ARCH_LIST="8.0;9.0" if building on a node without a GPU.
 cd src/croco/models/curope/
 python setup.py build_ext --inplace
 cd ../../../../
 ```
+
+> If the CUDA kernel build fails (e.g. `nvcc fatal: Unsupported gpu architecture`),
+> set `TORCH_CUDA_ARCH_LIST` to your GPU's compute capability (e.g. `8.0` for A100,
+> `9.0` for H100) before running `setup.py`. RoPE also has a pure-PyTorch fallback,
+> so evaluation still runs (just slower) if the kernel is unavailable.
 
 ### Scal3R-STream3R
 
@@ -173,18 +180,22 @@ Scal3R freezes the pretrained base model and only trains the pose query tokens, 
 
 ### Data Preparation
 
-We use [TartanAir](https://theairlab.org/tartanair-dataset/) for training. Follow [CUT3R's preprocessing guide](scal3r_cut3r/docs/preprocess.md) to prepare the dataset, then update the dataset root path in the config files accordingly.
+We use the following dataset for training:
+
+- [TartanAir](https://theairlab.org/tartanair-dataset/) — [License](https://github.com/castacks/tartanair_tools/blob/master/LICENSE)
+
+Follow [CUT3R's preprocessing guide](scal3r_cut3r/docs/preprocess.md) to prepare the dataset, then update the dataset root path in the config files accordingly.
 
 ### Scal3R-CUT3R
 
-Training uses [Accelerate](https://huggingface.co/docs/accelerate) for multi-GPU. The config is at `scal3r_cut3r/config/train_scal3r_stage1.yaml`.
+Training uses [Accelerate](https://huggingface.co/docs/accelerate) for multi-GPU. The config is at `scal3r_cut3r/config/finetune_scal3r.yaml`.
 
 ```bash
 cd scal3r_cut3r/src
-accelerate launch --multi_gpu train.py --config-name train_scal3r_stage1
+accelerate launch --multi_gpu train.py --config-name finetune_scal3r
 ```
 
-Key training settings (in `config/train_scal3r_stage1.yaml`):
+Key training settings (in `config/finetune_scal3r.yaml`):
 - **Frozen**: encoder + decoder + reconstruction head (`freeze='encoder_and_decoder_and_head'`)
 - **Trainable**: `relative_pose_token`, `prev_pose_proj`, `RelativePoseDecoder`
 - **Loss**: relative pose only (`use_relative_pose_loss=True`, `use_pts_loss=False`)
@@ -193,14 +204,14 @@ Key training settings (in `config/train_scal3r_stage1.yaml`):
 
 ### Scal3R-STream3R
 
-Training uses [PyTorch Lightning](https://lightning.ai/) + [DeepSpeed](https://www.deepspeed.ai/). The experiment config is at `scal3r_stream3r/configs/experiment/stream3r/stream3r_rel_pose.yaml`.
+Training uses [PyTorch Lightning](https://lightning.ai/) + [DeepSpeed](https://www.deepspeed.ai/). The experiment config is at `scal3r_stream3r/configs/experiment/stream3r/finetune_scal3r.yaml`.
 
 ```bash
 cd scal3r_stream3r
-python stream3r/train.py experiment=stream3r/stream3r_rel_pose
+python stream3r/train.py experiment=stream3r/finetune_scal3r
 ```
 
-Key training settings (in `configs/experiment/stream3r/stream3r_rel_pose.yaml`):
+Key training settings (in `configs/experiment/stream3r/finetune_scal3r.yaml`):
 - **Frozen**: all except `rel_pose_token`, `prev_pose_proj`, `rel_pose_decoder` (`freeze='rel_pose_prompt'`)
 - **Trainable**: pose query tokens + projection + decoder
 - **Loss**: relative pose only (`use_rel_pose_loss=True`, all other loss weights=0)

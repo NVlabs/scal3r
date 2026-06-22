@@ -326,9 +326,9 @@ class Regr3DPose(Criterion, MultiLoss):
         max_metric_scale=False,
         use_pts_loss=True,
         use_pose_loss=False,
-        use_relative_pose_loss=True,
-        rot_loss_weight=10.0,
-        trans_loss_weight=1.0,
+        use_rel_pose_loss=True,
+        rel_rot_loss_weight=1.0,
+        rel_trans_loss_weight=1.0,
         use_align_scale=False,
     ):
         super().__init__(criterion)
@@ -347,11 +347,11 @@ class Regr3DPose(Criterion, MultiLoss):
         # Loss switches to control which losses to compute
         self.use_pts_loss = use_pts_loss
         self.use_pose_loss = use_pose_loss
-        self.use_relative_pose_loss = use_relative_pose_loss
+        self.use_rel_pose_loss = use_rel_pose_loss
 
         # Loss weights to balance translation vs rotation
-        self.rot_loss_weight = rot_loss_weight
-        self.trans_loss_weight = trans_loss_weight
+        self.rel_rot_loss_weight = rel_rot_loss_weight
+        self.rel_trans_loss_weight = rel_trans_loss_weight
 
         # Scale alignment switch
         self.use_align_scale = use_align_scale
@@ -906,7 +906,7 @@ class Regr3DPose(Criterion, MultiLoss):
             # # do not add cross view loss when there is only camera supervision
 
         skys = [gt["sky_mask"] & ~valid for gt, valid in zip(gts, valids)]
-        # Note: get_all_pts3d_with_scale_loss doesn't compute relative poses
+        
         gt_relative_poses = []
         pr_relative_poses = []
         return (
@@ -1025,8 +1025,8 @@ class Regr3DPose(Criterion, MultiLoss):
         cosine = (trace - 1) / 2
         rot_loss = torch.acos(torch.clamp(cosine, -1.0 + 1e-6, 1.0 - 1e-6)).mean()
 
-        trans_loss_weight = getattr(self, 'trans_loss_weight', 1.0)
-        return trans_loss_weight * trans_loss + self.rot_loss_weight * rot_loss
+        rel_trans_loss_weight = getattr(self, 'rel_trans_loss_weight', 1.0)
+        return rel_trans_loss_weight * trans_loss + self.rel_rot_loss_weight * rot_loss
 
     def compute_relative_pose_token_loss(self, gt_relative_poses, pr_relative_poses):
         """Compute relative pose token loss.
@@ -1161,7 +1161,7 @@ class Regr3DPose(Criterion, MultiLoss):
             details["pose_loss"] = pose_loss
 
         # Conditionally compute relative pose token loss
-        if self.use_relative_pose_loss:
+        if self.use_rel_pose_loss:
             relative_pose_token_loss, _ = self.compute_relative_pose_token_loss(
                 gt_relative_poses, pr_relative_poses
             )
@@ -1190,15 +1190,15 @@ class Regr3DPoseBatchList(Regr3DPose):
         max_metric_scale=False,
         use_pts_loss=True,
         use_pose_loss=False,
-        use_relative_pose_loss=True,
-        rot_loss_weight=10.0,
-        trans_loss_weight=1.0,
+        use_rel_pose_loss=True,
+        rel_rot_loss_weight=10.0,
+        rel_trans_loss_weight=1.0,
         use_align_scale=False,
     ):
         super().__init__(
             criterion, norm_mode, gt_scale, sky_loss_value, max_metric_scale,
-            use_pts_loss, use_pose_loss, use_relative_pose_loss,
-            rot_loss_weight, trans_loss_weight, use_align_scale
+            use_pts_loss, use_pose_loss, use_rel_pose_loss,
+            rel_rot_loss_weight, rel_trans_loss_weight, use_align_scale
         )
         self.depth_only_criterion = DepthScaleShiftInvLoss()
         self.single_view_criterion = ScaleInvLoss()
@@ -1369,7 +1369,7 @@ class Regr3DPoseBatchList(Regr3DPose):
             details["pose_loss"] = pose_loss
 
         # Conditionally compute relative pose token loss
-        if self.use_relative_pose_loss:
+        if self.use_rel_pose_loss:
             relative_pose_token_loss, _ = self.compute_relative_pose_token_loss(
                 gt_relative_poses, pr_relative_poses
             )
@@ -1391,7 +1391,7 @@ class ConfLoss(MultiLoss):
     Loss switches:
         use_pts_loss: Use confidence-weighted point cloud loss
         use_pose_loss: Use absolute pose loss
-        use_relative_pose_loss: Use relative pose token loss
+        use_rel_pose_loss: Use relative pose token loss
     """
 
     def __init__(self, pixel_loss, alpha=1):
@@ -1403,7 +1403,7 @@ class ConfLoss(MultiLoss):
         # Inherit loss switches from pixel_loss
         self.use_pts_loss = getattr(pixel_loss, 'use_pts_loss', True)  # Default True for backward compat
         self.use_pose_loss = getattr(pixel_loss, 'use_pose_loss', False)
-        self.use_relative_pose_loss = getattr(pixel_loss, 'use_relative_pose_loss', True)
+        self.use_rel_pose_loss = getattr(pixel_loss, 'use_rel_pose_loss', True)
 
     def get_name(self):
         return f"ConfLoss({self.pixel_loss})"
@@ -1467,7 +1467,7 @@ class ConfLoss(MultiLoss):
         if self.use_pose_loss and "pose_loss" in details:
             final_loss = final_loss + details["pose_loss"]
 
-        if self.use_relative_pose_loss and "relative_pose_token_loss" in details:
+        if self.use_rel_pose_loss and "relative_pose_token_loss" in details:
             final_loss = final_loss + details["relative_pose_token_loss"]
 
         return final_loss, details

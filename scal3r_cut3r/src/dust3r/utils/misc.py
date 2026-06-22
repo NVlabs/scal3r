@@ -1,11 +1,3 @@
-# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
-#
-# NVIDIA CORPORATION and its licensors retain all intellectual property
-# and proprietary rights in and to this software, related documentation
-# and any modifications thereto.  Any use, reproduction, disclosure or
-# distribution of this software and related documentation without an express
-# license agreement from NVIDIA CORPORATION is strictly prohibited.
-
 # Copyright (C) 2024-present Naver Corporation. All rights reserved.
 # Licensed under CC BY-NC-SA 4.0 (non-commercial use only).
 #
@@ -36,14 +28,6 @@ def freeze_all_params(modules):
         except AttributeError:
 
             module.requires_grad = False
-
-def fix_all_params(modules):
-    for module in modules:
-        try:
-            for n, param in module.named_parameters():
-                param._is_frozen = True
-        except AttributeError:
-            module._is_frozen = True
 
 
 def is_symmetrized(gt1, gt2):

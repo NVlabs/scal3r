@@ -1,11 +1,3 @@
-# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
-#
-# NVIDIA CORPORATION and its licensors retain all intellectual property
-# and proprietary rights in and to this software, related documentation
-# and any modifications thereto.  Any use, reproduction, disclosure or
-# distribution of this software and related documentation without an express
-# license agreement from NVIDIA CORPORATION is strictly prohibited.
-
 # Copyright (C) 2022-present Naver Corporation. All rights reserved.
 # Licensed under CC BY-NC-SA 4.0 (non-commercial use only).
 #
@@ -34,7 +26,7 @@ from torch import inf
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 
-printer = get_logger(__name__, log_level="INFO")
+printer = get_logger(__name__, log_level="DEBUG")
 
 
 class SmoothedValue(object):
@@ -431,7 +423,7 @@ def load_model(args, model_without_ddp, optimizer, loss_scaler):
                 args.resume, map_location="cpu", check_hash=True
             )
         else:
-            checkpoint = torch.load(args.resume, map_location="cpu", weights_only=False)
+            checkpoint = torch.load(args.resume, map_location="cpu")
         printer.info("Resume checkpoint %s" % args.resume)
         model_without_ddp.load_state_dict(checkpoint["model"], strict=False)
         args.start_epoch = checkpoint["epoch"] + 1
@@ -531,8 +523,6 @@ def get_parameter_groups(
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue  # frozen weights
-        if hasattr(param, '_is_frozen') and param._is_frozen:
-            continue  # fixed weights (gradients computed but not updated)
 
         # Assign weight decay values
         if len(param.shape) == 1 or name.endswith(".bias") or name in skip_list:

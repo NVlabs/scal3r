@@ -319,7 +319,8 @@ def eval_pose_estimation(args, model, save_dir=None):
 
 
 def eval_pose_estimation_dist(args, model, img_path, save_dir=None, mask_path=None):
-    from dust3r.inference import inference, inference_recurrent, make_kf_only_callbacks
+    from dust3r.inference import inference, inference_recurrent
+    from dust3r.utils.pgo import make_kf_only_callbacks
 
     metadata = dataset_metadata.get(args.eval_dataset)
     anno_path = metadata.get("anno_path", None)
@@ -348,7 +349,7 @@ def eval_pose_estimation_dist(args, model, img_path, save_dir=None, mask_path=No
     # Loop closure detector (loaded once, reused across sequences)
     loop_detector = None
     if args.loop_closure and not getattr(args, 'loop_gt', False):
-        from dust3r.loop_closure import OnlineLoopDetector
+        from dust3r.utils.loop_closure import OnlineLoopDetector
         loop_detector = OnlineLoopDetector(
             device=device,
             similarity_threshold=args.loop_similarity_threshold,
@@ -421,7 +422,7 @@ def eval_pose_estimation_dist(args, model, img_path, save_dir=None, mask_path=No
                 # Reset / create loop detector for new sequence
                 seq_loop_detector = loop_detector  # SALAD detector (shared)
                 if args.loop_closure and getattr(args, 'loop_gt', False):
-                    from dust3r.loop_closure import GTLoopDetector
+                    from dust3r.utils.loop_closure import GTLoopDetector
                     gt_file = metadata["gt_traj_func"](img_path, anno_path, seq)
                     if gt_file and os.path.isfile(gt_file):
                         seq_loop_detector = GTLoopDetector(
@@ -865,7 +866,7 @@ if __name__ == "__main__":
                         pgo_adaptive_sigma=False, pgo_warmstart=False,
                         kf_edges_only=False, rot_gap_power=None, trans_gap_power=None,
                         use_pgo1_poses=False, use_online_pgo=False):
-        from dust3r.inference import accumulate_poses
+        from dust3r.utils.pgo import accumulate_poses
 
         valid_length = len(outputs["pred"]) // revisit
         outputs["pred"] = outputs["pred"][-valid_length:]

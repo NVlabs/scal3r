@@ -159,7 +159,7 @@ except ImportError:
 
         def apply_rope1d(self, tokens, pos1d, cos, sin):
             assert pos1d.ndim == 2
-            # Handle negative positions (special tokens like pose_token, relative_pose_token)
+            # Handle negative positions (special tokens like pose_token, rel_pose_token)
             # These tokens should not receive position encoding
             valid_mask = pos1d >= 0  # Shape: (B, N)
             
