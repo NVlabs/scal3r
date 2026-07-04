@@ -10,7 +10,9 @@ import os
 import sys
 from copy import deepcopy
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+# Insert (not append) so this repo's `eval`/`stream3r` packages take priority over
+# any pip-installed / container-baked copy (e.g. /workspace/CUT3R) on sys.path.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 import time
 import torch
 import argparse
@@ -144,11 +146,12 @@ def main(args):
         else:
             checkpoint = raw
             config = {}
+        # NOTE: ref_feat_type / rel_pose_global_only are no longer model params
+        # (the model is locked to camera_token + concat). The CLI flags are kept
+        # for backward-compatible invocation but are not passed to the model.
         model = STream3R(
             use_rel_pose_prompt=config.get('use_rel_pose_prompt', args.use_rel_pose),
             num_rel_pose_tokens=config.get('num_rel_pose_tokens', 4),
-            ref_feat_type=config.get('ref_feat_type', args.ref_feat_type),
-            rel_pose_global_only=config.get('rel_pose_global_only', args.rel_pose_global_only),
         )
         model.load_state_dict(checkpoint, strict=False)
         if args.use_rel_pose:
@@ -206,7 +209,11 @@ def main(args):
                             view[name] = view[name].to(device,
                                                         non_blocking=True)
 
-                if model_name == "ours" or model_name == "stream3r":
+                # `model` is always a STream3R in this script (built from --pretrained
+                # or the yslan/STream3R fallback), so this inference path must run for
+                # any model_name. Keying it only on a hard-coded name made custom names
+                # (e.g. scal3r_stream3r) silently skip inference -> images_all unbound.
+                if model_name == "ours" or model_name == "stream3r" or args.pretrained is not None:
                     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
                     batch_cpu = [
                         {

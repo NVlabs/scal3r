@@ -15,7 +15,7 @@
 import logging
 import torch
 import torch.nn as nn
-from typing import Tuple, List, Optional, Dict
+from typing import Tuple, List, Optional
 from torch.utils.checkpoint import checkpoint
 
 from stream3r.models.components.layers import PatchEmbed
@@ -50,7 +50,6 @@ class STreamAggregator(nn.Module):
         qk_norm=True,
         rope_freq=100,
         init_values=0.01,
-        # CUT3R-style relative pose prompt parameters
         use_rel_pose_prompt: bool = False,
         num_rel_pose_tokens: int = 4,  # number of learnable base tokens (fixed at training)
     ):
@@ -106,7 +105,6 @@ class STreamAggregator(nn.Module):
             raise ValueError(f"depth ({depth}) must be divisible by aa_block_size ({aa_block_size})")
 
         self.aa_block_num = self.depth // self.aa_block_size
-        self.use_checkpoint = True
 
         # Note: We have two camera tokens, one for the first frame and one for the rest
         # The same applies for register tokens
@@ -116,15 +114,9 @@ class STreamAggregator(nn.Module):
         # The patch tokens start after the camera and register tokens
         self.patch_start_idx = 1 + num_register_tokens
 
-        # CUT3R-style relative pose prompt tokens
-        # rel_pose_token: (1, n_base, C) — learnable base tokens (CUT3R: num_prompt_tokens)
-        # Training: token slots = max_ref_frames (fixed K for uniform P across frames in batch)
-        # Streaming inference: token slots = n_actual (dynamic, determined by buffer content)
-        # When n_base < K, last base token is repeated (CUT3R model.py:934-938)
         self.use_rel_pose_prompt = use_rel_pose_prompt
         if use_rel_pose_prompt:
             self.rel_pose_token = nn.Parameter(torch.randn(1, num_rel_pose_tokens, embed_dim) * 0.02)
-            # prev_pose_proj: project reference camera token (full concat, embed_dim*2) to embed_dim
             self.prev_pose_proj = Mlp(embed_dim * 2, embed_dim * 4, embed_dim, act_layer=nn.GELU, drop=0)
         else:
             self.rel_pose_token = None
@@ -156,6 +148,11 @@ class STreamAggregator(nn.Module):
         init_values=1.0,
         embed_dim=1024,
     ):
+        """
+        Build the patch embed layer. If 'conv', we use a
+        simple PatchEmbed conv layer. Otherwise, we use a vision transformer.
+        """
+
         if "conv" in patch_embed:
             self.patch_embed = PatchEmbed(img_size=img_size, patch_size=patch_size, in_chans=3, embed_dim=embed_dim)
         else:
@@ -200,7 +197,6 @@ class STreamAggregator(nn.Module):
         C = self.rel_pose_token.shape[-1]
         n_base = self.rel_pose_token.shape[1]
 
-        # Use the full (already-capped) buffer; reverse so k=0 = most recent
         selected = pose_token_buffer[::-1]
         n_actual = len(selected)
 
@@ -210,8 +206,6 @@ class STreamAggregator(nn.Module):
         ref_indices = [frame_idx for frame_idx, _ in selected]
         ref_feats = [feat for _, feat in selected]
 
-        # Base tokens: expand to n_actual, repeat last if n_actual > n_base
-        # (matches CUT3R model.py:930-938)
         if n_actual <= n_base:
             base = self.rel_pose_token[:, :n_actual, :].expand(B, -1, -1).clone()
         else:
@@ -219,7 +213,6 @@ class STreamAggregator(nn.Module):
             extra = self.rel_pose_token[:, -1:, :].expand(B, n_actual - n_base, -1).clone()
             base = torch.cat([base_part, extra], dim=1)
 
-        # Project + add (CUT3R inject_mode="once")
         proj_dtype = self.prev_pose_proj.fc1.weight.dtype
         projected = torch.stack([self.prev_pose_proj(f.to(proj_dtype)) for f in ref_feats], dim=1)  # [B, n_actual, C]
 
@@ -229,16 +222,15 @@ class STreamAggregator(nn.Module):
 
         return assembled, ref_indices, valid_mask, n_actual
 
-    def _create_attn_mask(self, S: int, P: int, mode: str, dtype: torch.dtype, device: torch.device,
-                          num_rel_pose_tokens: int = 0) -> torch.Tensor:
+    def _create_attn_mask(self, S: int, P: int, mode: str, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
         N = S * P
         mask = torch.zeros((N, N), dtype=dtype, device=device)
-
+        
         if mode == "causal":
             for i in range(S):
                 curr_view_start = i * P
                 curr_view_end = (i + 1) * P
-                mask[curr_view_start:curr_view_end, curr_view_end:] = float('-inf')
+                mask[curr_view_start:curr_view_end, curr_view_end:] = float('-inf')        
         elif mode == "window":
             window_size = 5
             for i in range(S):
@@ -252,14 +244,6 @@ class STreamAggregator(nn.Module):
         else:
             raise NotImplementedError(f"Unknown attention mode: {mode}")
 
-        # VQT: all queries cannot attend to rel_pose key positions in global blocks
-        # rel_pose tokens are at the end of each frame's token sequence
-        if num_rel_pose_tokens > 0 and mask is not None:
-            for i in range(S):
-                rel_start = i * P + P - num_rel_pose_tokens
-                rel_end = i * P + P
-                mask[:, rel_start:rel_end] = float('-inf')
-
         return mask
 
     def forward(
@@ -269,6 +253,19 @@ class STreamAggregator(nn.Module):
         kv_cache_list: List[List[torch.Tensor]] = None,
         pose_token_buffer: Optional[list] = None,
     ) -> Tuple[List[torch.Tensor], int]:
+        """
+        Args:
+            images (torch.Tensor): Input images with shape [B, S, 3, H, W], in range [0, 1].
+                B: batch size, S: sequence length, 3: RGB channels, H: height, W: width
+            mode (str): Global attention mode, could be either "causal", "window" or "full"
+            kv_cache_list (List[List[torch.Tensor]]): List of cached key-value pairs for
+                each global attention layer of the aggregator
+
+        Returns:
+            (list[torch.Tensor], int):
+                The list of outputs from the attention blocks,
+                and the patch_start_idx indicating where patch tokens begin.
+        """
         B, S, C_in, H, W = images.shape
 
         if C_in != 3:
@@ -276,6 +273,8 @@ class STreamAggregator(nn.Module):
 
         # Normalize images and reshape for patch embed
         images = (images - self._resnet_mean) / self._resnet_std
+
+        # Reshape to [B*S, C, H, W] for patch embedding
         images = images.view(B * S, C_in, H, W)
 
         patch_tokens = self.patch_embed(images)
@@ -283,7 +282,7 @@ class STreamAggregator(nn.Module):
         if isinstance(patch_tokens, dict):
             patch_tokens = patch_tokens["x_norm_patchtokens"]
 
-        _, P_patch, C = patch_tokens.shape
+        _, P, C = patch_tokens.shape
 
         rel_pose_info = {}
 
@@ -292,23 +291,17 @@ class STreamAggregator(nn.Module):
         camera_token = slice_expand_and_flatten(self.camera_token, B, S, is_anchor_exist=is_anchor_exist)
         register_token = slice_expand_and_flatten(self.register_token, B, S, is_anchor_exist=is_anchor_exist)
 
-        # CUT3R-style: assemble rel_pose_tokens with reference injection
         n_qs = 0  # number of rel_pose query-suffix tokens (dynamic)
         if self.use_rel_pose_prompt:
-            # rel_pose references always come from the camera-token buffer (streaming).
-            # No-KV-cache training is routed to STream3R._forward_per_frame_training upstream,
-            # which feeds this branch per frame with kv_cache + pose_token_buffer.
             assert kv_cache_list is not None and pose_token_buffer is not None, \
                 "use_rel_pose_prompt requires streaming (kv_cache + pose_token_buffer)"
             assembled, ref_indices, valid_mask, n_actual = self._assemble_rel_pose_tokens_streaming(
                 B, patch_tokens.device, patch_tokens.dtype, pose_token_buffer
             )
             if assembled is not None:
-                # assembled is [B, n_actual, C] where S=1 for streaming
                 rel_pose_tokens = assembled
                 n_qs = n_actual
             else:
-                # No refs available (first frame) — skip rel_pose tokens entirely
                 rel_pose_tokens = None
                 ref_indices = []
                 valid_mask = torch.zeros(B, 1, 0, dtype=torch.bool, device=patch_tokens.device)
@@ -327,6 +320,8 @@ class STreamAggregator(nn.Module):
             pos = self.position_getter(B * S, H // self.patch_size, W // self.patch_size, device=images.device)
 
         if self.patch_start_idx > 0:
+            # do not use position embedding for special tokens (camera and register tokens)
+            # so set pos to 0 for the special tokens
             pos = pos + 1
             pos_special = torch.zeros(B * S, self.patch_start_idx, 2).to(images.device).to(pos.dtype)
             pos = torch.cat([pos_special, pos], dim=1)
@@ -336,6 +331,7 @@ class STreamAggregator(nn.Module):
             pos_rel_pose = torch.zeros(B * S, n_qs, 2).to(images.device).to(pos.dtype)
             pos = torch.cat([pos, pos_rel_pose], dim=1)
 
+        # update P because we added special tokens
         _, P, C = tokens.shape
 
         attn_mask = None
@@ -346,8 +342,7 @@ class STreamAggregator(nn.Module):
                 block_causal_S = S
             else:
                 # Training window/full: use explicit mask
-                attn_mask = self._create_attn_mask(S, P, mode, tokens.dtype, tokens.device,
-                                                    num_rel_pose_tokens=n_qs)
+                attn_mask = self._create_attn_mask(S, P, mode, tokens.dtype, tokens.device)
 
         # Save original assembled rel_pose tokens for residual connection (CUT3R-style)
         rel_pose_residual = None
@@ -363,7 +358,6 @@ class STreamAggregator(nn.Module):
         for _ in range(self.aa_block_num):
             for attn_type in self.aa_order:
                 if attn_type == "frame":
-                    # Frame blocks: n_query_suffix for K/V truncation (VQT)
                     tokens, frame_idx, frame_intermediates = self._process_frame_attention(
                         tokens, B, S, P, C, frame_idx, pos=pos, n_query_suffix=n_qs
                     )
@@ -387,14 +381,12 @@ class STreamAggregator(nn.Module):
                     raise ValueError(f"Unknown attention type: {attn_type}")
 
             for i in range(len(frame_intermediates)):
+                # concat frame and global intermediates, [B x S x P x 2C]
                 concat_inter = torch.cat([frame_intermediates[i], global_intermediates[i]], dim=-1)
                 output_list.append(concat_inter)
 
-        # Residual: add original assembled rel_pose tokens to the last output.
-        # C here is the per-path dim (1024), output_list has concat dim (2C=2048).
         if rel_pose_residual is not None and len(output_list) > 0:
             last = output_list[-1].clone()  # [B, S, P, 2C]
-            # Add residual to both frame half and global half
             last[:, :, -n_qs:, :C] = last[:, :, -n_qs:, :C] + rel_pose_residual
             last[:, :, -n_qs:, C:] = last[:, :, -n_qs:, C:] + rel_pose_residual
             output_list[-1] = last
@@ -409,6 +401,10 @@ class STreamAggregator(nn.Module):
             return output_list, self.patch_start_idx, n_qs, rel_pose_info
 
     def _process_frame_attention(self, tokens, B, S, P, C, frame_idx, pos=None, n_query_suffix=0):
+        """
+        Process frame attention blocks. We keep tokens in shape (B*S, P, C).
+        """
+        # If needed, reshape tokens or positions:
         if tokens.shape != (B * S, P, C):
             tokens = tokens.view(B, S, P, C).view(B * S, P, C)
 
@@ -417,21 +413,18 @@ class STreamAggregator(nn.Module):
 
         intermediates = []
 
+        # by default, self.aa_block_size=1, which processes one block at a time
         for _ in range(self.aa_block_size):
-            if self.use_checkpoint:
-                tokens = checkpoint(
-                    self.frame_blocks[frame_idx],
-                    tokens,
-                    pos,
-                    None,  # attn_mask
-                    None,  # kv_cache
-                    n_query_suffix,
-                    use_reentrant=False
-                )
-            else:
-                tokens = self.frame_blocks[frame_idx](
-                    tokens, pos, None, None, n_query_suffix,
-                )
+            tokens = checkpoint(
+                self.frame_blocks[frame_idx],
+                tokens,
+                pos,
+                None,
+                None,
+                n_query_suffix,
+                use_reentrant=False,
+                
+            )
             frame_idx += 1
             intermediates.append(tokens.view(B, S, P, C))
 
@@ -439,6 +432,9 @@ class STreamAggregator(nn.Module):
 
     def _process_global_attention(self, tokens, B, S, P, C, global_idx, pos=None, attn_mask=None,
                                    kv_cache=None, n_query_suffix=0, block_causal_S=0):
+        """
+        Process global attention blocks. We keep tokens in shape (B, S*P, C).
+        """
         if tokens.shape != (B, S * P, C):
             tokens = tokens.view(B, S, P, C).view(B, S * P, C)
 
@@ -447,39 +443,30 @@ class STreamAggregator(nn.Module):
 
         intermediates = []
 
+        # by default, self.aa_block_size=1, which processes one block at a time
         for _ in range(self.aa_block_size):
             if kv_cache is not None:
-                if self.use_checkpoint:
-                    tokens, kv_cache = checkpoint(
-                        self.global_blocks[global_idx],
-                        tokens,
-                        pos,
-                        attn_mask,
-                        kv_cache,
-                        n_query_suffix,
-                        block_causal_S,
-                        use_reentrant=False
-                    )
-                else:
-                    tokens, kv_cache = self.global_blocks[global_idx](
-                        tokens, pos, attn_mask, kv_cache, n_query_suffix, block_causal_S,
-                    )
+                tokens, kv_cache = checkpoint(
+                    self.global_blocks[global_idx],
+                    tokens,
+                    pos,
+                    attn_mask,
+                    kv_cache,
+                    n_query_suffix,
+                    block_causal_S,
+                    use_reentrant=False
+                )
             else:
-                if self.use_checkpoint:
-                    tokens = checkpoint(
-                        self.global_blocks[global_idx],
-                        tokens,
-                        pos,
-                        attn_mask,
-                        None,  # kv_cache
-                        n_query_suffix,
-                        block_causal_S,
-                        use_reentrant=False
-                    )
-                else:
-                    tokens = self.global_blocks[global_idx](
-                        tokens, pos, attn_mask, None, n_query_suffix, block_causal_S,
-                    )
+                tokens = checkpoint(
+                    self.global_blocks[global_idx],
+                    tokens,
+                    pos,
+                    attn_mask,
+                    None,
+                    n_query_suffix,
+                    block_causal_S,
+                    use_reentrant=False
+                )
             global_idx += 1
             intermediates.append(tokens.view(B, S, P, C))
 
@@ -491,16 +478,28 @@ class STreamAggregator(nn.Module):
 
 def slice_expand_and_flatten(token_tensor, B, S, is_anchor_exist=False):
     """
-    Processes specialized tokens with shape (1, 2, X, C) for multi-frame processing.
+    Processes specialized tokens with shape (1, 2, X, C) for multi-frame processing:
+    1) Uses the first position (index=0) for the first frame only
+    2) Uses the second position (index=1) for all remaining frames (S-1 frames)
+    3) Expands both to match batch size B
+    4) Concatenates to form (B, S, X, C) where each sequence has 1 first-position token
+       followed by (S-1) second-position tokens
+    5) Flattens to (B*S, X, C) for processing
 
     Returns:
         torch.Tensor: Processed tokens with shape (B*S, X, C)
     """
+
+    # Slice out the "query" tokens => shape (1, 1, ...)
     if is_anchor_exist:
         query = token_tensor[:, 0:1, ...].expand(B, 1, *token_tensor.shape[2:])
     else:
         query = token_tensor[:, 1:, ...].expand(B, 1, *token_tensor.shape[2:])
+    # Slice out the "other" tokens => shape (1, S-1, ...)
     others = token_tensor[:, 1:, ...].expand(B, S - 1, *token_tensor.shape[2:])
+    # Concatenate => shape (B, S, ...)
     combined = torch.cat([query, others], dim=1)
+
+    # Finally flatten => shape (B*S, ...)
     combined = combined.view(B * S, *combined.shape[2:])
     return combined

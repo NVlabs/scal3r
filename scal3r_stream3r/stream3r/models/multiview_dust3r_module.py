@@ -1,11 +1,3 @@
-# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
-#
-# NVIDIA CORPORATION and its licensors retain all intellectual property
-# and proprietary rights in and to this software, related documentation
-# and any modifications thereto.  Any use, reproduction, disclosure or
-# distribution of this software and related documentation without an express
-# license agreement from NVIDIA CORPORATION is strictly prohibited.
-
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 
@@ -61,8 +53,6 @@ class MultiViewDUSt3RLitModule(LightningModule):
         pretrained: Optional[str] = None,
         resume_from_checkpoint: Optional[str] = None,
         eval_use_pts3d_from_local_head: bool = True,
-        prompt_token_lr_multiplier: float = 1.0,
-        prompt_decoder_lr_multiplier: float = 1.0,
     ) -> None:
         super().__init__()
 
@@ -262,49 +252,7 @@ class MultiViewDUSt3RLitModule(LightningModule):
     #     pass
 
     def configure_optimizers(self) -> Dict[str, Any]:
-        # Create parameter groups with different learning rates
-        prompt_token_lr_multiplier = getattr(self.hparams, 'prompt_token_lr_multiplier', 1.0)
-        prompt_decoder_lr_multiplier = getattr(self.hparams, 'prompt_decoder_lr_multiplier', 1.0)
-
-        use_param_groups = (prompt_token_lr_multiplier != 1.0 or prompt_decoder_lr_multiplier != 1.0)
-
-        if use_param_groups:
-            # Separate parameters into groups
-            token_params = []
-            decoder_params = []
-            other_params = []
-
-            for name, param in self.trainer.model.named_parameters():
-                if not param.requires_grad:
-                    continue
-                if 'rel_pose_token' in name:
-                    token_params.append(param)
-                    log.info(f"Token param (lr x{prompt_token_lr_multiplier}): {name}")
-                elif 'rel_pose_decoder' in name or 'prev_pose_proj' in name:
-                    decoder_params.append(param)
-                    log.info(f"Decoder param (lr x{prompt_decoder_lr_multiplier}): {name}")
-                else:
-                    other_params.append(param)
-
-            # Get base learning rate from optimizer config
-            base_lr = self.hparams.optimizer.keywords.get('lr', 1e-4)
-
-            param_groups = []
-            if other_params:
-                param_groups.append({'params': other_params, 'lr': base_lr})
-            if token_params:
-                param_groups.append({'params': token_params, 'lr': base_lr * prompt_token_lr_multiplier})
-            if decoder_params:
-                param_groups.append({'params': decoder_params, 'lr': base_lr * prompt_decoder_lr_multiplier})
-
-            # Create optimizer with param groups
-            optimizer_cls = self.hparams.optimizer.func
-            optimizer_kwargs = {k: v for k, v in self.hparams.optimizer.keywords.items() if k != 'lr'}
-            optimizer = optimizer_cls(param_groups, **optimizer_kwargs)
-
-            log.info(f"Learning rates: base={base_lr}, token={base_lr * prompt_token_lr_multiplier}, decoder={base_lr * prompt_decoder_lr_multiplier}")
-        else:
-            optimizer = self.hparams.optimizer(params=self.trainer.model.parameters())
+        optimizer = self.hparams.optimizer(params=self.trainer.model.parameters())
 
         if self.hparams.scheduler is not None:
             scheduler_config = self.hparams.scheduler

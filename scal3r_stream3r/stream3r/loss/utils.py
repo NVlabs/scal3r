@@ -537,40 +537,8 @@ def gradient_loss_multi_scale(prediction, target, mask, scales=4, gradient_loss_
     return total
 
 
-def rotation_6d_to_matrix(rot_6d: torch.Tensor) -> torch.Tensor:
-    """
-    Convert 6D rotation representation to 3x3 rotation matrix using Gram-Schmidt orthogonalization.
-
-    Args:
-        rot_6d: [..., 6] tensor containing 6D rotation representation
-
-    Returns:
-        [..., 3, 3] rotation matrix
-    """
-    a1, a2 = rot_6d[..., :3], rot_6d[..., 3:6]
-    b1 = F.normalize(a1, dim=-1)
-    b2 = a2 - (b1 * a2).sum(dim=-1, keepdim=True) * b1
-    b2 = F.normalize(b2, dim=-1)
-    b3 = torch.cross(b1, b2, dim=-1)
-    return torch.stack([b1, b2, b3], dim=-1)
-
-
-def matrix_to_rotation_6d(rot_matrix: torch.Tensor) -> torch.Tensor:
-    """
-    Convert 3x3 rotation matrix to 6D rotation representation.
-
-    Args:
-        rot_matrix: [..., 3, 3] rotation matrix
-
-    Returns:
-        [..., 6] 6D rotation representation (first two columns of the matrix)
-    """
-    return rot_matrix[..., :, :2].flatten(start_dim=-2)
-
-
 def _compute_relative_poses_window(
     gt_extrinsics, rel_pose_dict,
-    gt_pts3d_scale=None, pred_pts3d_scale=None,
     pred_pts3d=None, gt_pts3d=None, pts3d_valid_mask=None,
     use_align_scale=False,
     eps=1e-3,
@@ -583,8 +551,6 @@ def _compute_relative_poses_window(
         gt_extrinsics: [B, S, 4, 4] cam2world
         rel_pose_dict: {'rel_trans': [B,S,K,3], 'rel_rot': [B,S,K,3,3],
                         'ref_indices': [S,K], 'valid_mask': [B,S,K]}
-        gt_pts3d_scale: [B] scale normalization for GT (depth-based fallback)
-        pred_pts3d_scale: [B] scale normalization for pred (depth-based fallback)
         pred_pts3d: [B, S, H, W, 3] predicted world points (for align_scale)
         gt_pts3d: [B, S, H, W, 3] GT world points (for align_scale)
         pts3d_valid_mask: [B, S, H, W] valid mask for pts3d (for align_scale)
@@ -691,12 +657,9 @@ def _compute_relative_poses_window(
         # GT: divide by norm_factor_gt
         gt_scale = norm_factor_gt.view(1, 1, B, 1)
         gt_rel_trans = gt_rel_trans / gt_scale.clamp(min=eps)
-    elif gt_pts3d_scale is not None and pred_pts3d_scale is not None:
-        # Fallback: depth-based normalization
-        gt_scale = gt_pts3d_scale.float().view(1, 1, B, 1)
-        pr_scale = pred_pts3d_scale.float().view(1, 1, B, 1).clamp(min=eps)
-        gt_rel_trans = gt_rel_trans / gt_scale.clamp(min=eps)
-        pr_rel_trans_out = pr_rel_trans_out / pr_scale
+    # else: no scale alignment (identity) — matches scal3r_cut3r's use_align_scale=False
+    # path (losses.py: S = ones). The depth-based fallback was a stream3r-only addition
+    # with no cut3r counterpart and is removed for systematic alignment.
 
     return (
         {'trans': gt_rel_trans, 'rot': gt_rel_rot, 'valid': valid_out},

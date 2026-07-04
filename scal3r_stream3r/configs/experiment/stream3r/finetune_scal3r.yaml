@@ -64,10 +64,6 @@ data:
 model:
   pretrained: weights/stream3r/model.pt
 
-  # Learning rate multipliers for relative pose parameters
-  prompt_token_lr_multiplier: 1.0
-  prompt_decoder_lr_multiplier: 1.0
-
   net:
     use_rel_pose_prompt: true
     num_rel_pose_tokens: 1   # learnable base token count

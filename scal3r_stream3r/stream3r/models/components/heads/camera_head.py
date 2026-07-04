@@ -78,7 +78,6 @@ class CameraHead(nn.Module):
         fl_act: str = "relu",  # Field of view activations: ensures FOV values are positive.
         # Relative pose prompt parameters
         use_rel_pose_prompt: bool = False,
-        num_rel_pose_tokens: int = 8,
     ):
         super().__init__()
 
@@ -93,8 +92,6 @@ class CameraHead(nn.Module):
             self.rel_pose_decoder = RelativePoseDecoder(dim_in=dim_in)
         else:
             self.rel_pose_decoder = None
-
-        self._no_grad_trunk = False
 
         self.trans_act = trans_act
         self.quat_act = quat_act
@@ -202,11 +199,7 @@ class CameraHead(nn.Module):
         if kv_cache_list is None:
             attn_mask = self._create_attn_mask(S, mode, pose_tokens.dtype, pose_tokens.device)
 
-        if self.training and self._no_grad_trunk:
-            with torch.no_grad():
-                pred_pose_enc_list = self.trunk_fn(pose_tokens, num_iterations, attn_mask, kv_cache_list)
-        else:
-            pred_pose_enc_list = self.trunk_fn(pose_tokens, num_iterations, attn_mask, kv_cache_list)
+        pred_pose_enc_list = self.trunk_fn(pose_tokens, num_iterations, attn_mask, kv_cache_list)
 
         # CUT3R-style per-token MLP decode (no prev_pose_token needed)
         rel_pose_dict = None

@@ -558,7 +558,16 @@ def main():
     args.full_seq = False
     args.no_crop = False
 
-    if args.pretrained is not None:
+    if args.pretrained is not None and os.path.isdir(args.pretrained):
+        # HF-native folder (config.json + model.safetensors) — exactly the path a
+        # user hits with STream3R.from_pretrained(repo_id) after downloading.
+        model = STream3R.from_pretrained(args.pretrained)
+        print(f"Loaded HF-native model from {args.pretrained}")
+        if args.use_rel_pose:
+            model.max_ref_frames = args.max_ref_frames
+            print(f"Inference max_ref_frames={args.max_ref_frames}")
+        model = model.to(args.device)
+    elif args.pretrained is not None:
         raw = torch.load(args.pretrained, map_location=args.device, weights_only=False)
         # New format: {'state_dict': ..., 'config': ...}; old format: plain state_dict
         if isinstance(raw, dict) and 'state_dict' in raw and 'config' in raw:

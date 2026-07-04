@@ -322,7 +322,6 @@ class CausalLoss(MultiLoss):
 
             gt_relative_poses, pr_relative_poses = _compute_relative_poses_window(
                 gt_extrinsics, rel_pose_dict,
-                gt_pts3d_scale=gt_pts3d_scale, pred_pts3d_scale=pred_pts3d_scale,
                 pred_pts3d=pred_pts3d, gt_pts3d=gt_pts3d,
                 pts3d_valid_mask=pts3d_valid_mask,
                 use_align_scale=self.use_align_scale,

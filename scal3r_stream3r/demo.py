@@ -679,18 +679,15 @@ def run_inference(args):
             num_rel_pose_tokens = checkpoint[rel_pose_token_key].shape[1]
             print(f"Detected num_rel_pose_tokens={num_rel_pose_tokens} from checkpoint.")
 
-        ref_feat_type = ckpt_config.get('ref_feat_type', args.ref_feat_type)
-        rel_pose_global_only = ckpt_config.get('rel_pose_global_only', args.rel_pose_global_only)
-
+        # NOTE: ref_feat_type / rel_pose_global_only are no longer model params
+        # (the model is locked to camera_token + concat). The CLI flags are kept
+        # for backward-compatible invocation but are not passed to the model.
         model = STream3R(
             use_rel_pose_prompt=model_use_rel_pose,
             num_rel_pose_tokens=num_rel_pose_tokens,
-            ref_feat_type=ref_feat_type,
-            rel_pose_global_only=rel_pose_global_only,
         )
         missing, unexpected = model.load_state_dict(checkpoint, strict=False)
-        print(f"Model: use_rel_pose={model_use_rel_pose}, num_tokens={num_rel_pose_tokens}, "
-              f"ref_feat_type={ref_feat_type}, global_only={rel_pose_global_only}")
+        print(f"Model: use_rel_pose={model_use_rel_pose}, num_tokens={num_rel_pose_tokens}")
         if missing:
             print(f"  Missing keys ({len(missing)}): {missing[:5]}{'...' if len(missing) > 5 else ''}")
         if unexpected:
