@@ -141,37 +141,6 @@ dataset_metadata = {
         "skip_condition": None,
         "process_func": None,
     },
-    "tum_full": {
-        "img_path": "data/tum",
-        "mask_path": None,
-        "dir_path_func": lambda img_path, seq: os.path.join(img_path, seq, "rgb"),
-        "gt_traj_func": lambda img_path, anno_path, seq: os.path.join(
-            img_path, seq, "groundtruth.txt"
-        ),
-        "traj_format": "tum",
-        "seq_list": None,
-        "full_seq": True,
-        "mask_path_seq_func": lambda mask_path, seq: None,
-        "skip_condition": None,
-        "process_func": None,
-    },
-    **{
-        f"tum_s1_{num}": {
-            "img_path": "data/long_tum_s1",
-            "mask_path": None,
-            "dir_path_func": lambda img_path, seq, n=num: os.path.join(img_path, seq, f"rgb_{n}"),
-            "gt_traj_func": lambda img_path, anno_path, seq, n=num: os.path.join(
-                img_path, seq, f"groundtruth_{n}.txt"
-            ),
-            "traj_format": "tum",
-            "seq_list": None,
-            "full_seq": True,
-            "mask_path_seq_func": lambda mask_path, seq: None,
-            "skip_condition": None,
-            "process_func": None,
-        }
-        for num in [50, 100, 150, 200, 300, 400, 500, 600, 700, 800, 900, 1000]
-    },
     "sintel": {
         "img_path": "data/sintel/training/final",
         "anno_path": "data/sintel/training/camdata_left",
@@ -234,27 +203,6 @@ dataset_metadata = {
         "img_filter": lambda name: name.endswith("_rgb.jpg"),
     },
 }
-
-# Long TUM sequences (stride=1, variable length)
-tum_numbers = [50, 100, 150, 200, 300, 400, 500, 600, 700, 800, 900, 1000]
-tum_configs = {
-    f"tum_s1_{num}": {
-        "img_path": "data/long_tum_s1",
-        "mask_path": None,
-        "dir_path_func": lambda img_path, seq, num=num: os.path.join(img_path, seq, f"rgb_{num}"),
-        "gt_traj_func": lambda img_path, anno_path, seq, num=num: os.path.join(
-            img_path, seq, f"groundtruth_{num}.txt"
-        ),
-        "traj_format": "tum",
-        "seq_list": None,
-        "full_seq": True,
-        "mask_path_seq_func": lambda mask_path, seq: None,
-        "skip_condition": None,
-        "process_func": None,
-    }
-    for num in tum_numbers
-}
-dataset_metadata.update(tum_configs)
 
 
 # Define processing functions for each dataset

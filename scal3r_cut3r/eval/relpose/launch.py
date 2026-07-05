@@ -8,10 +8,8 @@
 
 import os
 import sys
-import time
-import csv
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 import math
 import cv2
 import numpy as np
@@ -53,6 +51,7 @@ def get_args_parser():
         "--eval_dataset",
         type=str,
         default="sintel",
+        choices=list(dataset_metadata.keys()),
     )
     parser.add_argument("--size", type=int, default="224")
 
@@ -296,19 +295,11 @@ def get_args_parser():
         default=5,
         help="Number of initial frames treated as keyframes before overlap-based selection (default: 5)",
     )
-    parser.add_argument(
-        "--save_relative_poses",
-        action="store_true",
-        default=False,
-        help="Save per-frame raw relative poses to CSV (pred_relative_poses.csv per sequence)",
-    )
     return parser
 
 
 def eval_pose_estimation(args, model, save_dir=None):
     metadata = dataset_metadata.get(args.eval_dataset)
-    if metadata is None:
-        raise ValueError(f"Unknown dataset {args.eval_dataset!r}. Available: {sorted(dataset_metadata.keys())}")
     img_path = metadata["img_path"]
     mask_path = metadata["mask_path"]
 
@@ -340,7 +331,6 @@ def eval_pose_estimation_dist(args, model, img_path, save_dir=None, mask_path=No
 
     if save_dir is None:
         save_dir = args.output_dir
-    os.makedirs(save_dir, exist_ok=True)
 
     distributed_state = PartialState()
     model.to(distributed_state.device)
@@ -366,10 +356,6 @@ def eval_pose_estimation_dist(args, model, img_path, save_dir=None, mask_path=No
         ate_list = []
         rpe_trans_list = []
         rpe_rot_list = []
-        fps_list = []
-        mem_list = []
-        total_frames = 0
-        total_infer_time = 0.0
         load_img_size = args.size
         error_log_path = f"{save_dir}/_error_log_{distributed_state.process_index}.txt"  # Unique log file per process
         bug = False
@@ -468,9 +454,6 @@ def eval_pose_estimation_dist(args, model, img_path, save_dir=None, mask_path=No
                     kf_for_state = keyframe_indices
                 else:
                     kf_for_state = None
-                torch.cuda.synchronize(device)
-                torch.cuda.reset_peak_memory_stats(device)
-                t_infer_start = time.perf_counter()
                 outputs, _ = inference_recurrent(
                     views, model, device,
                     ref_frame_indices_fn=ref_frame_indices_fn,
@@ -478,23 +461,6 @@ def eval_pose_estimation_dist(args, model, img_path, save_dir=None, mask_path=No
                     on_frame_processed=on_frame_processed,
                     buffer_pruning_fn=buffer_pruning_fn,
                 )
-                torch.cuda.synchronize(device)
-                t_infer_end = time.perf_counter()
-                seq_infer_time = t_infer_end - t_infer_start
-                seq_n_frames = len(views)
-                seq_fps = seq_n_frames / seq_infer_time if seq_infer_time > 0 else 0
-                seq_peak_mem = torch.cuda.max_memory_allocated(device) / 1024**2  # MB
-                total_frames += seq_n_frames
-                total_infer_time += seq_infer_time
-
-                # Save raw relative poses if requested
-                if getattr(args, 'save_relative_poses', False):
-                    relpose_path = f"{save_dir}/{seq}/pred_relative_poses.csv"
-                    _save_raw_relative_poses(
-                        outputs, relpose_path,
-                        revisit=args.revisit,
-                        reset_interval=args.reset_interval,
-                    )
 
                 # Determine use_relative_pose setting
                 if args.use_relative_pose and args.no_relative_pose:
@@ -530,13 +496,7 @@ def eval_pose_estimation_dist(args, model, img_path, save_dir=None, mask_path=No
                     use_online_pgo=args.use_online_pgo,
                 )
 
-                # Extract timestamps from image filenames for TUM format
-                traj_format = metadata.get("traj_format", None)
-                if traj_format == "tum":
-                    img_timestamps = [float(os.path.splitext(os.path.basename(f))[0]) for f in filelist]
-                else:
-                    img_timestamps = None
-                pred_traj = get_tum_poses(pr_poses, timestamps=img_timestamps)
+                pred_traj = get_tum_poses(pr_poses)
                 os.makedirs(f"{save_dir}/{seq}", exist_ok=True)
                 save_tum_poses(pr_poses, f"{save_dir}/{seq}/pred_traj.txt")
                 save_focals(cam_dict, f"{save_dir}/{seq}/pred_focal.txt")
@@ -562,17 +522,14 @@ def eval_pose_estimation_dist(args, model, img_path, save_dir=None, mask_path=No
                     gt_traj = None
 
                 if gt_traj is not None:
-                    _correct_scale = not args.no_correct_scale
                     ate, rpe_trans, rpe_rot = eval_metrics(
                         pred_traj,
                         gt_traj,
                         seq=seq,
                         filename=f"{save_dir}/{seq}_eval_metric.txt",
-                        correct_scale=_correct_scale,
                     )
                     plot_trajectory(
-                        pred_traj, gt_traj, title=seq, filename=f"{save_dir}/{seq}.png",
-                        correct_scale=_correct_scale,
+                        pred_traj, gt_traj, title=seq, filename=f"{save_dir}/{seq}.png"
                     )
                 else:
                     ate, rpe_trans, rpe_rot = 0, 0, 0
@@ -581,13 +538,11 @@ def eval_pose_estimation_dist(args, model, img_path, save_dir=None, mask_path=No
                 ate_list.append(ate)
                 rpe_trans_list.append(rpe_trans)
                 rpe_rot_list.append(rpe_rot)
-                fps_list.append(seq_fps)
-                mem_list.append(seq_peak_mem)
 
                 # Write to error log after each sequence
                 with open(error_log_path, "a") as f:
                     f.write(
-                        f"{args.eval_dataset}-{seq: <16} | ATE: {ate:.5f}, RPE trans: {rpe_trans:.5f}, RPE rot: {rpe_rot:.5f}, FPS: {seq_fps:.2f} ({seq_n_frames} frames / {seq_infer_time:.2f}s), Peak Mem: {seq_peak_mem:.0f}MB\n"
+                        f"{args.eval_dataset}-{seq: <16} | ATE: {ate:.5f}, RPE trans: {rpe_trans:.5f}, RPE rot: {rpe_rot:.5f}\n"
                     )
                     f.write(f"{ate:.5f}\n")
                     f.write(f"{rpe_trans:.5f}\n")
@@ -604,11 +559,11 @@ def eval_pose_estimation_dist(args, model, img_path, save_dir=None, mask_path=No
                     print(f"OOM error in sequence {seq}, skipping...")
                 elif "Degenerate covariance rank" in str(
                     e
-                ) or "Eigenvalues did not converge" in str(e) or "IndeterminantLinearSystemException" in str(type(e).__name__) or "Indeterminant" in str(e):
-                    # Handle numerical issues from GTSAM/eigensolve
+                ) or "Eigenvalues did not converge" in str(e):
+                    # Handle Degenerate covariance rank exception and Eigenvalues did not converge exception
                     with open(error_log_path, "a") as f:
                         f.write(f"Exception in sequence {seq}: {str(e)}\n")
-                    print(f"Numerical error in sequence {seq}, skipping.")
+                    print(f"Traj evaluation error in sequence {seq}, skipping.")
                 else:
                     raise e  # Rethrow if it's not an expected exception
 
@@ -616,8 +571,6 @@ def eval_pose_estimation_dist(args, model, img_path, save_dir=None, mask_path=No
 
     results = process_directory(save_dir)
     avg_ate, avg_rpe_trans, avg_rpe_rot = calculate_averages(results)
-    avg_fps = total_frames / total_infer_time if total_infer_time > 0 else 0
-    avg_peak_mem = sum(mem_list) / len(mem_list) if mem_list else 0
 
     # Write the averages to the error log (only on the main process)
     if distributed_state.is_main_process:
@@ -631,9 +584,6 @@ def eval_pose_estimation_dist(args, model, img_path, save_dir=None, mask_path=No
             f.write(
                 f"Average ATE: {avg_ate:.5f}, Average RPE trans: {avg_rpe_trans:.5f}, Average RPE rot: {avg_rpe_rot:.5f}\n"
             )
-            f.write(
-                f"Average FPS: {avg_fps:.2f} ({total_frames} frames / {total_infer_time:.2f}s), Average Peak Mem: {avg_peak_mem:.0f}MB\n"
-            )
 
     return avg_ate, avg_rpe_trans, avg_rpe_rot
 
@@ -645,6 +595,7 @@ if __name__ == "__main__":
     from dust3r.utils.image import load_images_for_eval as load_images
     from dust3r.post_process import estimate_focal_knowing_depth
     from dust3r.model import ARCroco3DStereo
+    from dust3r.utils.camera import pose_encoding_to_camera
     from dust3r.utils.geometry import weighted_procrustes, geotrf
 
     args.full_seq = False
@@ -673,80 +624,6 @@ if __name__ == "__main__":
             return_T=True,
         )
         return c2w, focal, pp.reshape(B, 2)
-
-    def _rotation_matrix_to_quaternion(R):
-        """Convert 3x3 rotation matrix to quaternion (qw, qx, qy, qz)."""
-        tr = R[0, 0] + R[1, 1] + R[2, 2]
-        if tr > 0:
-            s = 0.5 / math.sqrt(tr + 1.0)
-            qw = 0.25 / s
-            qx = (R[2, 1] - R[1, 2]) * s
-            qy = (R[0, 2] - R[2, 0]) * s
-            qz = (R[1, 0] - R[0, 1]) * s
-        elif R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
-            s = 2.0 * math.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2])
-            qw = (R[2, 1] - R[1, 2]) / s
-            qx = 0.25 * s
-            qy = (R[0, 1] + R[1, 0]) / s
-            qz = (R[0, 2] + R[2, 0]) / s
-        elif R[1, 1] > R[2, 2]:
-            s = 2.0 * math.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2])
-            qw = (R[0, 2] - R[2, 0]) / s
-            qx = (R[0, 1] + R[1, 0]) / s
-            qy = 0.25 * s
-            qz = (R[1, 2] + R[2, 1]) / s
-        else:
-            s = 2.0 * math.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1])
-            qw = (R[1, 0] - R[0, 1]) / s
-            qx = (R[0, 2] + R[2, 0]) / s
-            qy = (R[1, 2] + R[2, 1]) / s
-            qz = 0.25 * s
-        return qw, qx, qy, qz
-
-    def _save_raw_relative_poses(outputs, save_path, revisit=1, reset_interval=1000000):
-        """Extract and save raw model-predicted relative poses to CSV.
-
-        Each row: frame_idx, ref_idx, tx, ty, tz, qw, qx, qy, qz
-        """
-        preds = outputs["pred"]
-        views = outputs["views"]
-
-        # Handle revisit
-        valid_length = len(preds) // max(revisit, 1)
-        preds = preds[-valid_length:]
-        views = views[-valid_length:]
-
-        # Remove overlap frames (same logic as prepare_output)
-        has_reset_key = len(views) > 0 and "reset" in views[0]
-        if has_reset_key:
-            reset_mask = torch.cat([v["reset"] for v in views], 0)
-            shifted = torch.cat([torch.tensor(False).unsqueeze(0), reset_mask[:-1]], 0)
-            if shifted.any():
-                preds = [p for p, m in zip(preds, shifted) if not m]
-                views = [v for v, m in zip(views, shifted) if not m]
-
-        rows = []
-        for i, pred in enumerate(preds):
-            rel_poses = pred.get("relative_poses")        # (B, N, 4, 4) or None
-            ref_indices = pred.get("ref_frame_indices")    # List[int] or None
-            if rel_poses is None or ref_indices is None:
-                continue
-            rel_poses_np = rel_poses[0].cpu().float().numpy()  # (N, 4, 4)
-            N = rel_poses_np.shape[0]
-            for k, ref_idx in enumerate(ref_indices):
-                if k >= N:
-                    break
-                T = rel_poses_np[k]
-                tx, ty, tz = T[0, 3], T[1, 3], T[2, 3]
-                R = T[:3, :3]
-                qw, qx, qy, qz = _rotation_matrix_to_quaternion(R)
-                rows.append([i, ref_idx, tx, ty, tz, qw, qx, qy, qz])
-
-        with open(save_path, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["frame_idx", "ref_idx", "tx", "ty", "tz", "qw", "qx", "qy", "qz"])
-            writer.writerows(rows)
-        print(f"  Saved {len(rows)} relative poses to {save_path}")
 
     def _build_view_image_paths(img_paths, reset_interval):
         """Build view-indexed image path list that accounts for overlap frames.
@@ -799,7 +676,6 @@ if __name__ == "__main__":
                     "reset": torch.tensor((i + 1) % reset_interval == 0).unsqueeze(0),
                 }
                 views.append(view)
-                # Insert overlap frame after reset for state re-initialization
                 if (i + 1) % reset_interval == 0:
                     overlap_view = deepcopy(view)
                     overlap_view["reset"] = torch.tensor(False).unsqueeze(0)
@@ -872,7 +748,6 @@ if __name__ == "__main__":
         outputs["pred"] = outputs["pred"][-valid_length:]
         outputs["views"] = outputs["views"][-valid_length:]
 
-        # Remove overlap frames inserted after reset
         has_reset_key = len(outputs["views"]) > 0 and "reset" in outputs["views"][0]
         if has_reset_key:
             reset_mask = torch.cat([view["reset"] for view in outputs["views"]], 0)
@@ -887,17 +762,16 @@ if __name__ == "__main__":
                 outputs["views"] = [
                     view for view, mask in zip(outputs["views"], shifted_reset_mask) if not mask
                 ]
-
-        pts3ds_self = [
-            output["pts3d_in_self_view"].cpu() for output in outputs["pred"]
-        ]
-        pts3ds_other = [
-            output["pts3d_in_other_view"].cpu() for output in outputs["pred"]
-        ]
-        conf_self = [output["conf_self"].cpu() for output in outputs["pred"]]
-        conf_other = [output["conf"].cpu() for output in outputs["pred"]]
-
+        
         if solve_pose:
+            pts3ds_self = [
+                output["pts3d_in_self_view"].cpu() for output in outputs["pred"]
+            ]
+            pts3ds_other = [
+                output["pts3d_in_other_view"].cpu() for output in outputs["pred"]
+            ]
+            conf_self = [output["conf_self"].cpu() for output in outputs["pred"]]
+            conf_other = [output["conf"].cpu() for output in outputs["pred"]]
             pr_poses, focal, pp = recover_cam_params(
                 torch.cat(pts3ds_self, 0),
                 torch.cat(pts3ds_other, 0),
@@ -906,6 +780,15 @@ if __name__ == "__main__":
             )
             pts3ds_self = torch.cat(pts3ds_self, 0)
         else:
+
+            pts3ds_self = [
+                output["pts3d_in_self_view"].cpu() for output in outputs["pred"]
+            ]
+            pts3ds_other = [
+                output["pts3d_in_other_view"].cpu() for output in outputs["pred"]
+            ]
+            conf_self = [output["conf_self"].cpu() for output in outputs["pred"]]
+            conf_other = [output["conf"].cpu() for output in outputs["pred"]]
             pts3ds_self = torch.cat(pts3ds_self, 0)
             pr_poses = accumulate_poses(
                 outputs["pred"],

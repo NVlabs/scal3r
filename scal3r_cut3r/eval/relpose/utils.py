@@ -1,11 +1,3 @@
-# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
-#
-# NVIDIA CORPORATION and its licensors retain all intellectual property
-# and proprietary rights in and to this software, related documentation
-# and any modifications thereto.  Any use, reproduction, disclosure or
-# distribution of this software and related documentation without an express
-# license agreement from NVIDIA CORPORATION is strictly prohibited.
-
 from copy import deepcopy
 import cv2
 
@@ -79,15 +71,11 @@ def c2w_to_tumpose(c2w):
     return tum_pose
 
 
-def get_tum_poses(poses, timestamps=None):
+def get_tum_poses(poses):
     """
     poses: list of 4x4 arrays
-    timestamps: optional array of timestamps (e.g. from image filenames)
     """
-    if timestamps is None:
-        tt = np.arange(len(poses)).astype(float)
-    else:
-        tt = np.array(timestamps, dtype=float)
+    tt = np.arange(len(poses)).astype(float)
     tum_poses = [c2w_to_tumpose(p) for p in poses]
     tum_poses = np.stack(tum_poses, 0)
     return [tum_poses, tt]
