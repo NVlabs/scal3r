@@ -10,11 +10,9 @@ import os
 import sys
 import torch
 import argparse
-
-# Ensure project root is in sys.path before importing stream3r (local code over pip-installed)
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-
+from tqdm import tqdm
 from accelerate import PartialState
+
 from stream3r.models.stream3r import STream3R
 from stream3r.stream_session import StreamSession
 from stream3r.dust3r.utils.image import load_images_for_eval as load_images
@@ -22,9 +20,10 @@ from stream3r.dust3r.utils.device import collate_with_cat
 from stream3r.models.components.utils.pose_enc import pose_encoding_to_extri_intri
 from stream3r.dust3r.utils.geometry import inv
 from stream3r.utils.utils import ImgDust3r2Stream3r
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from eval.relpose.metadata import dataset_metadata
 from eval.relpose.utils import *
-from tqdm import tqdm
 
 
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -60,6 +59,7 @@ def get_args_parser():
         "--eval_dataset",
         type=str,
         default="sintel",
+        choices=list(dataset_metadata.keys()),
     )
     parser.add_argument("--size", type=int, default="224")
 
@@ -107,33 +107,60 @@ def get_args_parser():
         default=False,
         help="Use PGO for pose optimization during streaming inference",
     )
-    parser.add_argument("--kf_window", type=int, default=4, help="Keyframe window size for PGO buffer")
-    parser.add_argument("--nkf_buffer_size", type=int, default=0, help="Number of recent non-keyframes to keep in ref buffer (default: 0)")
-    parser.add_argument("--no_pgo", action="store_true", default=False, help="Disable PGO, use chain accumulation only")
-    parser.add_argument("--kf_only_cache", action="store_true", default=False, help="Only keyframes update KV cache (window mode)")
-    parser.add_argument("--num_init_frames", type=int, default=5, help="Number of initial frames treated as keyframes")
-    parser.add_argument("--pgo_sigma_rot", type=float, default=None, help="PGO rotation sigma (default: 0.5)")
-    parser.add_argument("--pgo_sigma_trans", type=float, default=None, help="PGO translation sigma (default: 0.5)")
-    parser.add_argument("--pgo_mode", type=str, default=None, choices=["huber", "cauchy", "tukey", "dcs", None], help="PGO robust kernel")
-    parser.add_argument("--pgo_max_edges", type=int, default=0, help="Max PGO edges per frame (0=unlimited)")
     parser.add_argument(
-        "--pretrained",
-        type=str,
-        default=None,
-        help="Path to pretrained model weights (.pt file)",
+        "--kf_window",
+        type=int,
+        default=4,
+        help="Keyframe window size for PGO buffer",
     )
     parser.add_argument(
-        "--ref_feat_type",
-        type=str,
-        default="img_feat",
-        choices=["img_feat", "camera_token"],
-        help="Reference feature type for rel_pose conditioning",
+        "--nkf_buffer_size",
+        type=int,
+        default=0,
+        help="Number of recent non-keyframes to keep in ref buffer (default: 0)",
     )
     parser.add_argument(
-        "--rel_pose_global_only",
+        "--no_pgo",
         action="store_true",
         default=False,
-        help="Only use global-path features (1024d) for rel_pose decoder",
+        help="Disable PGO, use chain accumulation only",
+    )
+    parser.add_argument(
+        "--kf_only_cache",
+        action="store_true",
+        default=False,
+        help="Only keyframes update KV cache (window mode)",
+    )
+    parser.add_argument(
+        "--num_init_frames",
+        type=int,
+        default=5,
+        help="Number of initial frames treated as keyframes",
+    )
+    parser.add_argument(
+        "--pgo_sigma_rot",
+        type=float,
+        default=None,
+        help="PGO rotation sigma (default: 0.5)",
+    )
+    parser.add_argument(
+        "--pgo_sigma_trans",
+        type=float,
+        default=None,
+        help="PGO translation sigma (default: 0.5)",
+    )
+    parser.add_argument(
+        "--pgo_mode",
+        type=str,
+        default=None,
+        choices=["huber", "cauchy", "tukey", "dcs", None],
+        help="PGO robust kernel",
+    )
+    parser.add_argument(
+        "--pgo_max_edges",
+        type=int,
+        default=0,
+        help="Max PGO edges per frame (0=unlimited)",
     )
     parser.add_argument(
         "--reset_interval",
@@ -202,18 +229,6 @@ def get_args_parser():
         default=1.0,
         help="Sigma scale for loop closure constraints (lower = tighter snap)",
     )
-    parser.add_argument(
-        "--no_correct_scale",
-        action="store_true",
-        default=False,
-        help="Disable scale correction in ATE/RPE evaluation (align=True, correct_scale=False)",
-    )
-    parser.add_argument(
-        "--crop",
-        action="store_true",
-        default=False,
-        help="Enable center cropping for input images (default: no crop)",
-    )
     return parser
 
 
@@ -249,7 +264,7 @@ def eval_pose_estimation_dist(args,
 
     # Loop closure detector (loaded once, reused across sequences)
     loop_detector = None
-    if getattr(args, 'loop_closure', False) and not getattr(args, 'loop_gt', False):
+    if args.loop_closure and not args.loop_gt:
         from stream3r.utils.loop_closure import OnlineLoopDetector
         loop_detector = OnlineLoopDetector(
             device=device,
@@ -260,7 +275,7 @@ def eval_pose_estimation_dist(args,
         )
         print(f"Loop closure enabled: threshold={args.loop_similarity_threshold}, "
               f"gap={args.loop_temporal_gap}, max_per_frame={args.loop_max_per_frame}")
-    elif getattr(args, 'loop_closure', False) and getattr(args, 'loop_gt', False):
+    elif args.loop_closure and args.loop_gt:
         print("Loop closure enabled: GT detection mode (ablation)")
 
     def _build_view_image_paths(img_paths, reset_interval):
@@ -318,7 +333,7 @@ def eval_pose_estimation_dist(args,
                     filelist,
                     size=518,
                     verbose=True,
-                    crop=getattr(args, 'crop', False),
+                    crop=True,
                     patch_size=14,
                 )
 
@@ -328,8 +343,8 @@ def eval_pose_estimation_dist(args,
 
                 with torch.no_grad():
                     # Enable PGO by default when using rel_pose (matches CUT3R)
-                    no_pgo = getattr(args, 'no_pgo', False)
-                    kf_only_cache = getattr(args, 'kf_only_cache', False)
+                    no_pgo = args.no_pgo
+                    kf_only_cache = args.kf_only_cache
                     use_pgo = (args.use_pgo or args.use_rel_pose) and not no_pgo
                     # kf_only_cache needs PGO callbacks for keyframe selection,
                     # even when --no_pgo is set (no_pgo only disables PGO poses)
@@ -337,28 +352,28 @@ def eval_pose_estimation_dist(args,
                     pgo_config = dict(
                         kf_pgo=use_pgo_session,
                         kf_window=args.kf_window,
-                        nkf_buffer_size=getattr(args, 'nkf_buffer_size', 0),
+                        nkf_buffer_size=args.nkf_buffer_size,
                         num_init_frames=args.num_init_frames,
                         kf_only_cache=kf_only_cache,
                     ) if use_pgo_session else None
                     if pgo_config is not None:
-                        if getattr(args, 'pgo_sigma_rot', None) is not None:
+                        if args.pgo_sigma_rot is not None:
                             pgo_config['pgo_sigma_rot'] = args.pgo_sigma_rot
-                        if getattr(args, 'pgo_sigma_trans', None) is not None:
+                        if args.pgo_sigma_trans is not None:
                             pgo_config['pgo_sigma_trans'] = args.pgo_sigma_trans
-                        if getattr(args, 'pgo_max_edges', 0) > 0:
+                        if args.pgo_max_edges > 0:
                             pgo_config['pgo_max_edges'] = args.pgo_max_edges
-                        if getattr(args, 'pgo_mode', None) is not None:
+                        if args.pgo_mode is not None:
                             pgo_config['pgo_mode'] = args.pgo_mode
-                        if getattr(args, 'use_global_pose_init', False):
+                        if args.use_global_pose_init:
                             pgo_config['use_global_pose_init'] = True
-                            if getattr(args, 'global_pose_prior_sigma', None) is not None:
+                            if args.global_pose_prior_sigma is not None:
                                 pgo_config['global_pose_prior_sigma'] = args.global_pose_prior_sigma
 
                     # Loop closure: set up per-sequence detector and image paths
                     seq_loop_detector = loop_detector  # SALAD detector (shared across seqs)
-                    reset_interval = getattr(args, 'reset_interval', 1000000)
-                    if getattr(args, 'loop_closure', False) and getattr(args, 'loop_gt', False):
+                    reset_interval = args.reset_interval
+                    if args.loop_closure and args.loop_gt:
                         from stream3r.utils.loop_closure import GTLoopDetector
                         gt_file = metadata["gt_traj_func"](img_path, anno_path, seq)
                         if gt_file and os.path.isfile(gt_file):
@@ -375,11 +390,12 @@ def eval_pose_estimation_dist(args,
                     if pgo_config is not None and seq_loop_detector is not None:
                         pgo_config['loop_detector'] = seq_loop_detector
                         pgo_config['loop_image_paths'] = _build_view_image_paths(filelist, reset_interval)
-                        pgo_config['loop_max_translation'] = getattr(args, 'loop_max_translation', 20.0)
-                        pgo_config['loop_sigma_scale'] = getattr(args, 'loop_sigma_scale', 1.0)
+                        pgo_config['loop_max_translation'] = args.loop_max_translation
+                        pgo_config['loop_sigma_scale'] = args.loop_sigma_scale
 
                     session = StreamSession(model, mode=args.mode,
-                                            use_pgo=use_pgo_session, pgo_config=pgo_config)
+                                            use_pgo=use_pgo_session, pgo_config=pgo_config,
+                                            max_ref_frames=args.max_ref_frames)
                     overlap_indices = []  # global prediction indices of overlap frames
                     num_frames = images.shape[1]
                     for i in range(num_frames):
@@ -415,7 +431,7 @@ def eval_pose_estimation_dist(args,
                         pr_poses = [p[0] for p in pgo_poses]
                     else:
                         # Fallback: multi-ref chain accumulation (K varies per frame)
-                        from eval.relpose.utils import _se3_inverse_batch, _reorthogonalize_c2w
+                        from stream3r.utils.pgo import _se3_inverse, _reorthogonalize_c2w
                         rel_pose_list = predictions["rel_pose"]
                         if not isinstance(rel_pose_list, list):
                             rel_pose_list = [rel_pose_list]
@@ -432,9 +448,10 @@ def eval_pose_estimation_dist(args,
                                 ref_idx = fi - k - 1
                                 if ref_idx < 0 or ref_idx not in c2w_history:
                                     continue
-                                inv_rel = _se3_inverse_batch(
-                                    rr[0, 0, k:k+1], rt[0, 0, k:k+1])
-                                c2w_i = c2w_history[ref_idx] @ inv_rel
+                                T_rel = torch.eye(4, device=device, dtype=rr.dtype)
+                                T_rel[:3, :3] = rr[0, 0, k]
+                                T_rel[:3, 3] = rt[0, 0, k]
+                                c2w_i = c2w_history[ref_idx] @ _se3_inverse(T_rel).unsqueeze(0)
                                 c2w_i[0] = _reorthogonalize_c2w(c2w_i[0])
                                 break
                             if c2w_i is None:
@@ -443,17 +460,12 @@ def eval_pose_estimation_dist(args,
                             pr_poses.append(c2w_i[0])
                 else:
                     extrinsic, _ = pose_encoding_to_extri_intri(predictions["pose_enc"], predictions["images"].shape[-2:])
+
                     pr_poses = []
                     for i in range(extrinsic.shape[1]):
                         pr_poses.append(inv(torch.cat([extrinsic[0, i], torch.tensor([[0, 0, 0, 1]], device=device)], dim=0)))
 
-                # Extract timestamps from image filenames for TUM format
-                traj_format = metadata.get("traj_format", None)
-                if traj_format == "tum":
-                    img_timestamps = [float(os.path.splitext(os.path.basename(f))[0]) for f in filelist]
-                else:
-                    img_timestamps = None
-                pred_traj = get_tum_poses(pr_poses, timestamps=img_timestamps)
+                pred_traj = get_tum_poses(pr_poses)
                 os.makedirs(f"{save_dir}/{seq}", exist_ok=True)
                 save_tum_poses(pr_poses, f"{save_dir}/{seq}/pred_traj.txt")
 
@@ -478,7 +490,6 @@ def eval_pose_estimation_dist(args,
                         gt_traj,
                         seq=seq,
                         filename=f"{save_dir}/{seq}_eval_metric.txt",
-                        correct_scale=not args.no_correct_scale,
                     )
                     plot_trajectory(pred_traj,
                                     gt_traj,
@@ -558,51 +569,7 @@ def main():
     args.full_seq = False
     args.no_crop = False
 
-    if args.pretrained is not None and os.path.isdir(args.pretrained):
-        # HF-native folder (config.json + model.safetensors) — exactly the path a
-        # user hits with STream3R.from_pretrained(repo_id) after downloading.
-        model = STream3R.from_pretrained(args.pretrained)
-        print(f"Loaded HF-native model from {args.pretrained}")
-        if args.use_rel_pose:
-            model.max_ref_frames = args.max_ref_frames
-            print(f"Inference max_ref_frames={args.max_ref_frames}")
-        model = model.to(args.device)
-    elif args.pretrained is not None:
-        raw = torch.load(args.pretrained, map_location=args.device, weights_only=False)
-        # New format: {'state_dict': ..., 'config': ...}; old format: plain state_dict
-        if isinstance(raw, dict) and 'state_dict' in raw and 'config' in raw:
-            checkpoint = raw['state_dict']
-            config = raw['config']
-            print(f"Loaded config from checkpoint: {config}")
-        else:
-            checkpoint = raw
-            config = {}
-
-        # Build model config: checkpoint config > CLI override > defaults
-        # NOTE: ref_feat_type / rel_pose_global_only are no longer model params
-        # (the model is locked to camera_token + concat). The CLI flags are kept
-        # for backward-compatible invocation but are not passed to the model.
-        use_rel_pose = config.get('use_rel_pose_prompt', args.use_rel_pose)
-        num_rel_pose_tokens = config.get('num_rel_pose_tokens', 4)
-
-        model = STream3R(
-            use_rel_pose_prompt=use_rel_pose,
-            num_rel_pose_tokens=num_rel_pose_tokens,
-        )
-        missing_keys, unexpected_keys = model.load_state_dict(checkpoint, strict=False)
-        print(f"Loaded pretrained from {args.pretrained}")
-        print(f"  use_rel_pose={use_rel_pose}, num_rel_pose_tokens={num_rel_pose_tokens}")
-        if missing_keys:
-            print(f"Missing keys: {missing_keys}")
-        if unexpected_keys:
-            print(f"Unexpected keys: {unexpected_keys}")
-        # Override max_ref_frames at inference time (buffer-window cap; CUT3R-style)
-        if args.use_rel_pose:
-            model.max_ref_frames = args.max_ref_frames
-            print(f"Inference max_ref_frames={args.max_ref_frames}")
-        model = model.to(args.device)
-    else:
-        model = STream3R.from_pretrained("yslan/STream3R").to(args.device)
+    model = STream3R.from_pretrained("nvidia/scal3r").to(args.device)
     model.eval()
 
     eval_pose_estimation(args, model, save_dir=args.output_dir)

@@ -332,6 +332,24 @@ The evaluation follows [MonST3R](https://github.com/Junyi42/monst3r) and [Spann3
     ```
     Results will be saved in `eval_results/relpose/${model_name}/${data}/_error_log.txt`.
 
+    > **Important — Pose-Graph Optimization (PGO) & loop closure dependencies.**
+    > Relative-pose evaluation uses `gtsam` (iSAM2 PGO), and KITTI additionally
+    > uses a VGGT-Long DINOv2+SALAD model for loop closure. `eval/relpose/run.sh`
+    > already applies the required environment fixes, but if you call
+    > `eval/relpose/launch.py` directly, replicate them:
+    > ```bash
+    > # gtsam needs conda's libstdc++ (CXXABI_1.3.15); otherwise its import fails
+    > # and PGO is SILENTLY skipped (ATE degrades, e.g. Sintel 0.157 -> ~0.30).
+    > export LD_PRELOAD="${CONDA_PREFIX}/lib/libstdc++.so.6"
+    > # Loop closure imports a VPR model via pytorch_lightning, which needs
+    > # pkg_resources (setuptools<71) and an importable wandb (remove a broken one).
+    > pip install 'setuptools<71'
+    > pip uninstall -y wandb
+    > ```
+    > Verify with `python -c "import gtsam"` — if it fails, PGO is disabled.
+    > For loop closure, place the VGGT-Long VPR weights at
+    > `reference/VGGT-Long/weights/{dinov2_vitb14_pretrain.pth,dino_salad.ckpt}`.
+
     ### Multi-view Reconstruction
 
     ```bash

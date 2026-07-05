@@ -22,6 +22,9 @@ MASTER_PORT=$(python -c 'import socket; s=socket.socket(); s.bind(("", 0)); prin
 # 2) Loop closure loads a VGGT-Long VPR model through pytorch_lightning, which
 #    needs pkg_resources (setuptools<71) and an importable wandb. A pinned wandb
 #    can ship a broken protobuf; removing it lets PL skip the wandb logger.
+# 3) The container image bakes in an older stream3r install; editable-install
+#    this repo so `import stream3r` resolves to the local (modified) code, then
+#    fail fast if it still resolves elsewhere.
 # ============================================================
 if [ -n "${CONDA_PREFIX:-}" ] && [ -f "${CONDA_PREFIX}/lib/libstdc++.so.6" ]; then
     export LD_PRELOAD="${CONDA_PREFIX}/lib/libstdc++.so.6${LD_PRELOAD:+:${LD_PRELOAD}}"
@@ -30,16 +33,14 @@ pip install -q 'setuptools<71' >/dev/null 2>&1 || true
 pip uninstall -y wandb >/dev/null 2>&1 || true
 python -c "import gtsam" 2>/dev/null && echo "[env] gtsam import OK -> PGO enabled" \
     || echo "[env] WARNING: gtsam import FAILED -> PGO disabled (check LD_PRELOAD / libstdc++)"
-
-# ============================================================
-# Model weights
-# ============================================================
-# Scal3R model weights
-PT_CAMTOKEN="weights/scal3r_stream3r/model.pt"
+unset PYTHONPATH   # the container bakes /workspace/CUT3R into PYTHONPATH, shadowing eval/
+pip install -q -e . --no-deps >/dev/null 2>&1 || true
+python scripts/check_local_stream3r.py
 
 # ============================================================
 # Helper function
 # ============================================================
+# Model weights are loaded from HF Hub (nvidia/scal3r) inside launch.py.
 run_eval() {
     local dataset=$1
     local tag=$2
@@ -52,8 +53,7 @@ run_eval() {
         eval/relpose/launch.py \
         --output_dir "${output_dir}/" \
         --eval_dataset "${dataset}" \
-        --pretrained "${PT_CAMTOKEN}" \
-        --use_rel_pose --ref_feat_type camera_token \
+        --use_rel_pose \
         "$@"
 }
 
@@ -98,7 +98,7 @@ run_eval vkitti best_camtoken_align \
 #   No-loop best on 01,03,04,10: kf12, nkf8, r40 (avg ATE 57.62)
 #   But r10 is used for loop closure compatibility
 # ============================================================
-KITTI_COMMON="--crop --mode window --kf_window 12 --max_ref_frames 12 --nkf_buffer_size 8 --num_init_frames 2"
+KITTI_COMMON="--mode window --kf_window 12 --max_ref_frames 12 --nkf_buffer_size 8 --num_init_frames 2"
 
 # Per-seq loop closure with optimal thresholds (sweep results, r10 for loop propagation)
 KITTI_LOOP="$KITTI_COMMON --reset_interval 10 --loop_closure --loop_temporal_gap 200"
@@ -109,7 +109,7 @@ run_eval kitti_odom best_camtoken_align --seq_list 06 $KITTI_LOOP --loop_similar
 run_eval kitti_odom best_camtoken_align --seq_list 07 $KITTI_LOOP --loop_similarity_threshold 0.60
 run_eval kitti_odom best_camtoken_align --seq_list 08 $KITTI_LOOP --loop_similarity_threshold 0.45
 # Sequences without loop closure (kf12 nkf4 r40 optimal from sweep)
-KITTI_NOLOOP="--crop --mode window --kf_window 12 --max_ref_frames 12 --nkf_buffer_size 4 --num_init_frames 2 --reset_interval 40"
+KITTI_NOLOOP="--mode window --kf_window 12 --max_ref_frames 12 --nkf_buffer_size 4 --num_init_frames 2 --reset_interval 40"
 run_eval kitti_odom best_camtoken_align --seq_list 01 03 04 09 10 $KITTI_NOLOOP
 
 echo ">>> All done"

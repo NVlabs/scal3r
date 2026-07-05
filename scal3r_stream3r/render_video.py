@@ -66,9 +66,6 @@ def parse_args():
     # ── Relative pose ──
     parser.add_argument("--use_rel_pose", action="store_true")
     parser.add_argument("--use_rel_pose_prompt", action="store_true")
-    parser.add_argument("--ref_feat_type", type=str, default="img_feat",
-                        choices=["img_feat", "camera_token"])
-    parser.add_argument("--rel_pose_global_only", action="store_true")
     parser.add_argument("--max_ref_frames", type=int, default=4)
 
     # ── PGO ──
@@ -308,9 +305,6 @@ def run_inference(args):
             num_rel_pose_tokens = checkpoint[rel_pose_token_key].shape[1]
             print(f"Detected num_rel_pose_tokens={num_rel_pose_tokens} from checkpoint.")
 
-        # NOTE: ref_feat_type / rel_pose_global_only are no longer model params
-        # (the model is locked to camera_token + concat). The CLI flags are kept
-        # for backward-compatible invocation but are not passed to the model.
         model = STream3R(
             use_rel_pose_prompt=model_use_rel_pose,
             num_rel_pose_tokens=num_rel_pose_tokens,
@@ -321,10 +315,6 @@ def run_inference(args):
             print(f"  Missing keys ({len(missing)}): {missing[:5]}{'...' if len(missing) > 5 else ''}")
         if unexpected:
             print(f"  Unexpected keys ({len(unexpected)}): {unexpected[:5]}{'...' if len(unexpected) > 5 else ''}")
-
-        if model_use_rel_pose:
-            model.aggregator.max_ref_frames = args.max_ref_frames
-            print(f"  Inference max_ref_frames={args.max_ref_frames}")
 
         model = model.to(device)
         use_rel_pose = model_use_rel_pose
@@ -404,7 +394,8 @@ def run_inference(args):
 
         print(f"Streaming inference: use_pgo={use_pgo}, kf_window={args.kf_window}, "
               f"nkf_buffer_size={args.nkf_buffer_size}")
-        session = StreamSession(model, mode=args.mode, use_pgo=use_pgo_session, pgo_config=pgo_config)
+        session = StreamSession(model, mode=args.mode, use_pgo=use_pgo_session, pgo_config=pgo_config,
+                                max_ref_frames=args.max_ref_frames)
 
         num_frames = images.shape[0]
         with torch.no_grad():

@@ -222,7 +222,7 @@ def make_traj(args) -> PoseTrajectory3D:
     return deepcopy(args)
 
 
-def eval_metrics(pred_traj, gt_traj=None, seq="", filename="", sample_stride=1, correct_scale=True):
+def eval_metrics(pred_traj, gt_traj=None, seq="", filename="", sample_stride=1):
 
     if sample_stride > 1:
         pred_traj[0] = pred_traj[0][::sample_stride]
@@ -255,10 +255,12 @@ def eval_metrics(pred_traj, gt_traj=None, seq="", filename="", sample_stride=1, 
         est_name="traj",
         pose_relation=PoseRelation.translation_part,
         align=True,
-        correct_scale=correct_scale,
+        correct_scale=True,
     )
 
     ate = ate_result.stats["rmse"]
+    # print(ate_result.np_arrays['error_array'])
+    # exit()
 
     # RPE rotation and translation
     delta_list = [1]
@@ -270,7 +272,7 @@ def eval_metrics(pred_traj, gt_traj=None, seq="", filename="", sample_stride=1, 
             est_name="traj",
             pose_relation=PoseRelation.rotation_angle_deg,
             align=True,
-            correct_scale=correct_scale,
+            correct_scale=True,
             delta=delta,
             delta_unit=Unit.frames,
             rel_delta_tol=0.01,
@@ -287,7 +289,7 @@ def eval_metrics(pred_traj, gt_traj=None, seq="", filename="", sample_stride=1, 
             est_name="traj",
             pose_relation=PoseRelation.translation_part,
             align=True,
-            correct_scale=correct_scale,
+            correct_scale=True,
             delta=delta,
             delta_unit=Unit.frames,
             rel_delta_tol=0.01,

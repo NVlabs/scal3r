@@ -141,20 +141,6 @@ dataset_metadata = {
         "skip_condition": None,
         "process_func": None,
     },
-    "tum_full": {
-        "img_path": "data/tum",
-        "mask_path": None,
-        "dir_path_func": lambda img_path, seq: os.path.join(img_path, seq, "rgb"),
-        "gt_traj_func": lambda img_path, anno_path, seq: os.path.join(
-            img_path, seq, "groundtruth.txt"
-        ),
-        "traj_format": "tum",
-        "seq_list": None,
-        "full_seq": True,
-        "mask_path_seq_func": lambda mask_path, seq: None,
-        "skip_condition": None,
-        "process_func": None,
-    },
     "sintel": {
         "img_path": "data/sintel/training/final",
         "anno_path": "data/sintel/training/camdata_left",
@@ -182,20 +168,6 @@ dataset_metadata = {
         "mask_path_seq_func": lambda mask_path, seq: None,
         "skip_condition": None,
         "process_func": lambda args, img_path: process_sintel(args, img_path),
-    },
-    "tum_s1_1000": {
-        "img_path": "data/long_tum_s1",
-        "mask_path": None,
-        "dir_path_func": lambda img_path, seq: os.path.join(img_path, seq, "rgb_1000"),
-        "gt_traj_func": lambda img_path, anno_path, seq: os.path.join(
-            img_path, seq, "groundtruth_1000.txt"
-        ),
-        "traj_format": "tum",
-        "seq_list": None,
-        "full_seq": True,
-        "mask_path_seq_func": lambda mask_path, seq: None,
-        "skip_condition": None,
-        "process_func": None,
     },
     "kitti_odom": {
         "img_path": "data/kitti_data",

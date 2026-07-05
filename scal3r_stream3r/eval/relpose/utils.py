@@ -1,11 +1,3 @@
-# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
-#
-# NVIDIA CORPORATION and its licensors retain all intellectual property
-# and proprietary rights in and to this software, related documentation
-# and any modifications thereto.  Any use, reproduction, disclosure or
-# distribution of this software and related documentation without an express
-# license agreement from NVIDIA CORPORATION is strictly prohibited.
-
 import cv2
 import numpy as np
 import torch
@@ -18,119 +10,6 @@ from eval.relpose.evo_utils import *
 from PIL import Image
 import imageio.v2 as iio
 from matplotlib.figure import Figure
-
-
-def _reorthogonalize_c2w(T):
-    """Re-orthogonalize rotation part of a 4x4 SE(3) matrix via SVD.
-    Prevents numerical drift from accumulated matrix multiplications."""
-    R = T[:3, :3]
-    U, _, Vh = torch.linalg.svd(R)
-    R_ortho = U @ Vh
-    if torch.det(R_ortho) < 0:
-        U[:, -1] *= -1
-        R_ortho = U @ Vh
-    T_out = T.clone()
-    T_out[:3, :3] = R_ortho
-    return T_out
-
-
-def _se3_inverse_batch(R_rel, t_rel):
-    """Compute SE(3) inverse for batched (R, t). Returns [B, 4, 4]."""
-    B = R_rel.shape[0]
-    device, dtype = R_rel.device, R_rel.dtype
-    R_inv = R_rel.transpose(-1, -2)
-    t_inv = -torch.bmm(R_inv, t_rel.unsqueeze(-1)).squeeze(-1)
-    T = torch.eye(4, device=device, dtype=dtype).unsqueeze(0).expand(B, -1, -1).clone()
-    T[:, :3, :3] = R_inv
-    T[:, :3, 3] = t_inv
-    return T
-
-
-def accumulate_relative_poses(rel_trans, rel_rot):
-    """Accumulate relative poses to global c2w (camera-to-world) poses.
-
-    Convention: T_rel_i = inv(T_i) @ T_ref
-    Accumulation: c2w_i = c2w_ref @ inv(T_rel_i)
-
-    Args:
-        rel_trans: [B, S, 3] relative translations
-        rel_rot: [B, S, 3, 3] relative rotation matrices
-
-    Returns:
-        c2w_list: list of S tensors, each [B, 4, 4] c2w poses
-    """
-    B, S, _ = rel_trans.shape
-    device = rel_trans.device
-    dtype = rel_trans.dtype
-
-    c2w = torch.eye(4, device=device, dtype=dtype).unsqueeze(0).expand(B, -1, -1).clone()
-    c2w_list = [c2w]
-
-    for i in range(1, S):
-        R_rel = rel_rot[:, i]
-        t_rel = rel_trans[:, i]
-        inv_rel = _se3_inverse_batch(R_rel, t_rel)
-        c2w = torch.bmm(c2w, inv_rel)
-        # Reorthogonalize to prevent drift (CUT3R: _reorthogonalize_c2w)
-        for b in range(B):
-            c2w[b] = _reorthogonalize_c2w(c2w[b])
-        c2w_list.append(c2w.clone())
-
-    return c2w_list
-
-
-def accumulate_relative_poses_multiref(rel_trans, rel_rot, valid_mask=None):
-    """CUT3R-style multi-reference chain accumulation.
-
-    For each frame, tries all K references and uses the most recent valid one.
-    Includes SVD reorthogonalization after each step.
-
-    Args:
-        rel_trans: [B, S, K, 3] per-token relative translations
-        rel_rot: [B, S, K, 3, 3] per-token relative rotation matrices
-        valid_mask: [B, S, K] bool — which refs are valid (optional)
-
-    Returns:
-        c2w_list: list of S tensors, each [B, 4, 4] c2w poses
-    """
-    B, S, K, _ = rel_trans.shape
-    device = rel_trans.device
-    dtype = rel_trans.dtype
-
-    c2w_history = {}  # frame_idx -> [B, 4, 4]
-    c2w_init = torch.eye(4, device=device, dtype=dtype).unsqueeze(0).expand(B, -1, -1).clone()
-    c2w_history[0] = c2w_init
-    c2w_list = [c2w_init]
-
-    for i in range(1, S):
-        c2w_i = None
-        # Try each reference k (k=0 is most recent, k=1 is one before, etc.)
-        for k in range(K):
-            ref_idx = i - k - 1
-            if ref_idx < 0:
-                break
-            if valid_mask is not None and not valid_mask[:, i, k].any():
-                continue
-            if ref_idx not in c2w_history:
-                continue
-
-            R_rel = rel_rot[:, i, k]    # [B, 3, 3]
-            t_rel = rel_trans[:, i, k]  # [B, 3]
-            inv_rel = _se3_inverse_batch(R_rel, t_rel)
-            c2w_i = torch.bmm(c2w_history[ref_idx], inv_rel)
-            # Reorthogonalize
-            for b in range(B):
-                c2w_i[b] = _reorthogonalize_c2w(c2w_i[b])
-            break  # Use first valid reference (most recent)
-
-        if c2w_i is None:
-            # Fallback: copy previous frame's pose
-            c2w_i = c2w_history.get(i - 1, c2w_init).clone()
-
-        c2w_history[i] = c2w_i
-        c2w_list.append(c2w_i)
-
-    return c2w_list
 
 
 def todevice(batch, device, callback=None, non_blocking=False):
@@ -184,15 +63,11 @@ def c2w_to_tumpose(c2w):
     return tum_pose
 
 
-def get_tum_poses(poses, timestamps=None):
+def get_tum_poses(poses):
     """
     poses: list of 4x4 arrays
-    timestamps: optional array of timestamps (e.g. from image filenames)
     """
-    if timestamps is None:
-        tt = np.arange(len(poses)).astype(float)
-    else:
-        tt = np.array(timestamps, dtype=float)
+    tt = np.arange(len(poses)).astype(float)
     tum_poses = [c2w_to_tumpose(p) for p in poses]
     tum_poses = np.stack(tum_poses, 0)
     return [tum_poses, tt]

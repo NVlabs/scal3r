@@ -17,9 +17,13 @@ class StreamSession:
     A causal streaming inference session with KV cache management for STream3R.
     Supports CUT3R-style pose_token_buffer for multi-reference relative pose.
     """
-    def __init__(self, model: STream3R, mode: str, use_pgo: bool = False, pgo_config: dict = None):
+    def __init__(self, model: STream3R, mode: str, use_pgo: bool = False, pgo_config: dict = None,
+                 max_ref_frames: int = None):
         self.model = model
         self.mode = mode
+        # Inference-time reference-buffer cap. Defaults to the model's training
+        # value; pass explicitly to use a different cap per dataset/run.
+        self.max_ref_frames = max_ref_frames if max_ref_frames is not None else model.max_ref_frames
         self.aggregator_kv_cache_depth = model.aggregator.depth
         self.camera_head_kv_cache_depth = model.camera_head.trunk_depth
         self.camera_head_iterations = 4
@@ -204,7 +208,7 @@ class StreamSession:
 
         # Cap reference count to max_ref_frames here (buffer-management layer),
         # so the model's assemble stays cap-agnostic (mirrors CUT3R).
-        capped_buffer = self.pose_token_buffer[-self.model.max_ref_frames:]
+        capped_buffer = self.pose_token_buffer[-self.max_ref_frames:]
         outputs = self.model(
             images=images,
             mode=self.mode,

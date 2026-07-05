@@ -10,9 +10,7 @@ import os
 import sys
 from copy import deepcopy
 
-# Insert (not append) so this repo's `eval`/`stream3r` packages take priority over
-# any pip-installed / container-baked copy (e.g. /workspace/CUT3R) on sys.path.
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 import time
 import torch
 import argparse
@@ -79,9 +77,6 @@ def get_args_parser():
                         help="Attention mode for streaming inference")
     parser.add_argument("--use_rel_pose", action="store_true", default=False,
                         help="Use streaming inference with rel_pose + PGO")
-    parser.add_argument("--ref_feat_type", type=str, default="camera_token",
-                        choices=["img_feat", "camera_token"])
-    parser.add_argument("--rel_pose_global_only", action="store_true", default=False)
     parser.add_argument("--kf_window", type=int, default=12)
     parser.add_argument("--max_ref_frames", type=int, default=12)
     parser.add_argument("--nkf_buffer_size", type=int, default=0)
@@ -146,16 +141,11 @@ def main(args):
         else:
             checkpoint = raw
             config = {}
-        # NOTE: ref_feat_type / rel_pose_global_only are no longer model params
-        # (the model is locked to camera_token + concat). The CLI flags are kept
-        # for backward-compatible invocation but are not passed to the model.
         model = STream3R(
             use_rel_pose_prompt=config.get('use_rel_pose_prompt', args.use_rel_pose),
             num_rel_pose_tokens=config.get('num_rel_pose_tokens', 4),
         )
         model.load_state_dict(checkpoint, strict=False)
-        if args.use_rel_pose:
-            model.aggregator.max_ref_frames = args.max_ref_frames
         model = model.to(device)
     else:
         model = STream3R.from_pretrained("yslan/STream3R").to(device)
@@ -241,8 +231,9 @@ def main(args):
                                 if args.global_pose_prior_sigma is not None:
                                     pgo_config['global_pose_prior_sigma'] = args.global_pose_prior_sigma
                             session = StreamSession(model, mode=args.mode,
-                                                    use_pgo=True, pgo_config=pgo_config)
-                            reset_interval = getattr(args, 'reset_interval', 1000000)
+                                                    use_pgo=True, pgo_config=pgo_config,
+                                                    max_ref_frames=args.max_ref_frames)
+                            reset_interval = args.reset_interval
                             overlap_indices = []
                             num_frames = images.shape[1]
                             with torch.no_grad():
