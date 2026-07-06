@@ -58,7 +58,7 @@ run_eval() {
 }
 
 # ============================================================
-# TUM (ATE: 0.021)
+# TUM (ATE: 0.0197, verified 2026-07-05 with crop + HF weights)
 #   Best: causal, kf12, nkf0, kfc, nif1, global_pose_init σ=0.01
 # ============================================================
 run_eval tum best_camtoken_align \
@@ -67,7 +67,7 @@ run_eval tum best_camtoken_align \
     --use_global_pose_init --global_pose_prior_sigma 0.01
 
 # ============================================================
-# ScanNet (ATE: 0.050)
+# ScanNet (ATE: 0.0494, verified 2026-07-05 with crop + HF weights)
 #   Best: causal, kf12, nkf0, kfc, nif1, global_pose_init σ=0.01
 # ============================================================
 run_eval scannet best_camtoken_align \
@@ -76,7 +76,7 @@ run_eval scannet best_camtoken_align \
     --use_global_pose_init --global_pose_prior_sigma 0.01
 
 # ============================================================
-# Sintel (ATE: 0.157)
+# Sintel (ATE: 0.1808, verified 2026-07-05 with crop + HF weights; was 0.157 no-crop)
 #   Best: window, kf20, nkf24, NO kfc, NO global_pose_init
 # ============================================================
 run_eval sintel best_camtoken_align \
@@ -84,7 +84,7 @@ run_eval sintel best_camtoken_align \
     --num_init_frames 2 --pgo_sigma_rot 0.1 --pgo_sigma_trans 0.3
 
 # ============================================================
-# vKITTI (ATE: 4.5)
+# vKITTI (ATE: 4.48, verified 2026-07-05 with crop + HF weights)
 #   Best: window, kf8, nkf0, reset_interval=20, NO kfc, NO global_pose_init
 # ============================================================
 run_eval vkitti best_camtoken_align \
