@@ -480,7 +480,7 @@ def prepare_output(
     """
     from src.dust3r.post_process import estimate_focal_knowing_depth
     from src.dust3r.utils.geometry import geotrf
-    from src.dust3r.inference import accumulate_poses
+    from src.dust3r.utils.pgo import accumulate_poses
 
     # Only keep the outputs corresponding to one full pass.
     valid_length = len(outputs["pred"]) // revisit
@@ -772,10 +772,11 @@ def run_inference(args):
     # (skipping overlap-based filtering).
     num_init = len(views) if not use_keyframes else getattr(args, 'num_init_frames', 5)
 
-    from src.dust3r.inference import make_kf_only_callbacks
+    from src.dust3r.utils.pgo import make_kf_only_callbacks
     ref_frame_indices_fn, on_frame_processed, keyframe_indices, buffer_pruning_fn = make_kf_only_callbacks(
         kf_window=args.kf_window,
         nkf_buffer_size=args.nkf_buffer_size,
+        max_ref_frames=(args.max_ref_frames if args.max_ref_frames is not None else 4),
         pgo_sigma_rot=args.pgo_sigma_rot,
         pgo_sigma_trans=args.pgo_sigma_trans,
         pgo_position_scale=getattr(args, 'pgo_position_scale', 0),
@@ -789,10 +790,6 @@ def run_inference(args):
         kf_ref_only=getattr(args, 'kf_ref_only', False),
         num_init_frames=num_init,
     )
-
-    # Override model's max_ref_frames at inference time
-    if args.max_ref_frames is not None:
-        model.max_ref_frames = args.max_ref_frames
 
     # State gating: match eval logic
     if args.no_kf_gate:

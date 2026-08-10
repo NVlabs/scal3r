@@ -63,20 +63,9 @@ Useful flags (pass through `EXTRA_ARGS` or append to `eval/relpose/launch.py`):
 Since the backbone and reconstruction heads are frozen and pose tokens are injected via asymmetric attention, Scal3R's pointmap quality is identical to the original CUT3R. To verify on 7-Scenes:
 
 ```bash
-# edit model_weights in the script to point to your checkpoint
-bash eval/mv_recon/run.sh # You may need to change [--num_processes] to the number of your gpus
+bash eval/mv_recon/run.sh
 ```
 
-Results will be saved in `eval_results/mv_recon/${model_name}_${ckpt_name}/logs_all.txt`.
+Results will be saved in `eval_results/mv_recon/scal3r_scal3r_cut3r/7scenes/logs_all.txt`.
 
-### Monodepth / Video Depth
-
-The depth evaluation scripts inherited from CUT3R also work unchanged (edit `model_weights` in the scripts to point to your checkpoint):
-
-```bash
-bash eval/monodepth/run.sh
-# Results: eval_results/monodepth/${data}_${model_name}/metric.json
-
-bash eval/video_depth/run.sh # You may need to change [--num_processes] to the number of your gpus
-# Results: eval_results/video_depth/${data}_${model_name}/result_scale.json
-```
+The script uses `--kf_every 1 --max_frames 300` (dense consecutive frames) and runs on a single GPU (`--num_processes 1`) to avoid OOM. Using the default `kf_every=200` produces sparse sampling that does not match the paper's evaluation protocol.

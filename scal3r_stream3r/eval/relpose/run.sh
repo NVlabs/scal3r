@@ -19,9 +19,12 @@ MASTER_PORT=$(python -c 'import socket; s=socket.socket(); s.bind(("", 0)); prin
 #    CXXABI_1.3.15) is preloaded. Without this, gtsam import fails and PGO is
 #    *silently* disabled -> the trajectory falls back to the raw chain and ATE
 #    degrades a lot on drifty scenes (e.g. Sintel 0.157 -> ~0.30).
-# 2) Loop closure loads a VGGT-Long VPR model through pytorch_lightning, which
-#    needs pkg_resources (setuptools<71) and an importable wandb. A pinned wandb
-#    can ship a broken protobuf; removing it lets PL skip the wandb logger.
+# 2) Loop closure needs faiss (descriptor index) and the VGGT-Long VPR model,
+#    which is loaded through pytorch_lightning + pytorch_metric_learning.
+#    pytorch_lightning additionally needs pkg_resources (setuptools<71) and an
+#    importable wandb; a pinned wandb can ship a broken protobuf, so removing it
+#    lets PL skip the wandb logger. Without faiss/pytorch_metric_learning the
+#    KITTI loop-closure runs abort with ImportError.
 # 3) The container image bakes in an older stream3r install; editable-install
 #    this repo so `import stream3r` resolves to the local (modified) code, then
 #    fail fast if it still resolves elsewhere.
@@ -29,10 +32,13 @@ MASTER_PORT=$(python -c 'import socket; s=socket.socket(); s.bind(("", 0)); prin
 if [ -n "${CONDA_PREFIX:-}" ] && [ -f "${CONDA_PREFIX}/lib/libstdc++.so.6" ]; then
     export LD_PRELOAD="${CONDA_PREFIX}/lib/libstdc++.so.6${LD_PRELOAD:+:${LD_PRELOAD}}"
 fi
-pip install -q 'setuptools<71' >/dev/null 2>&1 || true
+pip install -q 'setuptools<71' faiss-cpu pytorch-metric-learning >/dev/null 2>&1 || true
 pip uninstall -y wandb >/dev/null 2>&1 || true
 python -c "import gtsam" 2>/dev/null && echo "[env] gtsam import OK -> PGO enabled" \
     || echo "[env] WARNING: gtsam import FAILED -> PGO disabled (check LD_PRELOAD / libstdc++)"
+python -c "import faiss, pytorch_metric_learning" 2>/dev/null \
+    && echo "[env] faiss + pytorch_metric_learning OK -> loop closure enabled" \
+    || echo "[env] WARNING: faiss/pytorch_metric_learning FAILED -> KITTI loop closure will error out"
 unset PYTHONPATH   # the container bakes /workspace/CUT3R into PYTHONPATH, shadowing eval/
 pip install -q -e . --no-deps >/dev/null 2>&1 || true
 python scripts/check_local_stream3r.py
@@ -97,7 +103,15 @@ run_eval vkitti best_camtoken_align \
 #   Base: window, kf12, nkf8, reset_interval=10, default sigma
 #   No-loop best on 01,03,04,10: kf12, nkf8, r40 (avg ATE 57.62)
 #   But r10 is used for loop closure compatibility
+#
+#   All seven invocations below share one output dir on purpose: the reported
+#   average is recomputed from every <seq>/<seq>_eval_metric.txt under it, so
+#   only the LAST run's "Average ATE" line covers all 11 sequences.
+#   => the dir must be EMPTY before the first KITTI run. Leftover metric files
+#      from an earlier run (e.g. an older seq00/ layout) are silently folded
+#      into the average.
 # ============================================================
+rm -rf "${workdir}/eval_results/relpose/best_camtoken_align/kitti_odom"
 KITTI_COMMON="--mode window --kf_window 12 --max_ref_frames 12 --nkf_buffer_size 8 --num_init_frames 2"
 
 # Per-seq loop closure with optimal thresholds (sweep results, r10 for loop propagation)

@@ -2,7 +2,6 @@
 set -e
 
 workdir='.'
-
 model_name='stream3r'
 
 output_dir="${workdir}/eval_results/mv_recon/${model_name}/"
@@ -12,3 +11,6 @@ python eval/mv_recon/launch.py \
     --output_dir="$output_dir" \
     --size=518 \
     --model_name="stream3r" \
+    --eval_datasets 7scenes \
+    --kf_every 1 \
+    --max_frames 300

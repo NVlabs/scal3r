@@ -61,10 +61,9 @@ The script applies the per-benchmark inference settings used in the paper:
 > export LD_PRELOAD="${CONDA_PREFIX}/lib/libstdc++.so.6"
 > # Loop closure imports a VPR model via pytorch_lightning, which needs
 > # pkg_resources (setuptools<71) and an importable wandb (remove a broken one).
-> pip install 'setuptools<71'
+> pip install 'setuptools<71' faiss-cpu pytorch-metric-learning
 > pip uninstall -y wandb
 > ```
-> Verify with `python -c "import gtsam"` — if it fails, PGO is disabled.
 
 ### Multi-view Reconstruction
 
@@ -74,16 +73,6 @@ Since the backbone and reconstruction heads are frozen and pose tokens are injec
 bash eval/mv_recon/run.sh
 ```
 
-Results will be saved in `eval_results/mv_recon/${model_name}/${data}/logs_all.txt`.
+Results will be saved in `eval_results/mv_recon/stream3r/7scenes/logs_all.txt`.
 
-### Monodepth / Video Depth
-
-The depth evaluation scripts inherited from STream3R also work unchanged:
-
-```bash
-bash eval/monodepth/run.sh
-# Results: eval_results/monodepth/${model_name}/${data}/metric.json
-
-bash eval/video_depth/run.sh
-# Results: eval_results/video_depth/${model_name}/${data}/result_scale.json
-```
+The script uses `--kf_every 1 --max_frames 300` (dense consecutive frames). Using the default `kf_every=200` produces sparse sampling that does not match the paper's evaluation protocol.

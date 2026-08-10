@@ -88,6 +88,10 @@ def get_args_parser():
     parser.add_argument("--global_pose_prior_sigma", type=float, default=None)
     parser.add_argument("--kf_every", type=int, default=None,
                         help="Override dataset kf_every (e.g., 3 for ~300 frames)")
+    parser.add_argument("--max_frames", type=int, default=None,
+                        help="Keep at most this many frames per sequence, after "
+                             "kf_every subsampling (e.g. --kf_every 1 --max_frames 300 "
+                             "for 300 dense consecutive frames)")
     parser.add_argument("--scene_start", type=int, default=0,
                         help="Start scene index (for parallel split)")
     parser.add_argument("--scene_end", type=int, default=None,
@@ -119,6 +123,7 @@ def main(args):
             num_seq=1,
             full_video=True,
             kf_every=kf_every_7s,
+            max_frames=args.max_frames,
         )
     if eval_datasets is None or "NRGBD" in eval_datasets:
         datasets_all["NRGBD"] = NRGBD(
@@ -128,6 +133,7 @@ def main(args):
             num_seq=1,
             full_video=True,
             kf_every=kf_every_nrgbd,
+            max_frames=args.max_frames,
         )
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
