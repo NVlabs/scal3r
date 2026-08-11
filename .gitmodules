@@ -1,0 +1,6 @@
+[submodule "scal3r_cut3r"]
+	path = scal3r_cut3r
+	url = https://gitlab-master.nvidia.com/chinyangl/scal3r_cut3r.git
+[submodule "scal3r_stream3r"]
+	path = scal3r_stream3r
+	url = https://gitlab-master.nvidia.com/chinyangl/scal3r_stream3r.git
