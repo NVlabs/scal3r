@@ -1,3 +1,11 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# NVIDIA CORPORATION and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA CORPORATION is strictly prohibited.
+
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 
@@ -5,6 +13,8 @@
 # LICENSE file in the root directory of this source tree.
 
 from typing import Any, Dict, List, Optional, Tuple
+import os
+import shutil
 
 import hydra
 import lightning as L
@@ -12,6 +22,7 @@ import rootutils
 import torch
 import signal  # noqa: F401
 from lightning import Callback, LightningDataModule, LightningModule, Trainer
+from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import Logger
 from omegaconf import DictConfig, OmegaConf
 
@@ -99,9 +110,33 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         log.info("Logging hyperparameters!")
         log_hyperparameters(object_dict)
 
+    # Backup source code to output_dir for reproducibility
+    src_backup_src = os.path.join(rootutils.find_root(indicator=".project-root"), "stream3r")
+    src_backup_dst = os.path.join(cfg.paths.output_dir, "source_backup", "stream3r")
+    if os.path.isdir(src_backup_src) and not os.path.exists(src_backup_dst):
+        log.info(f"Backing up source code: {src_backup_src} -> {src_backup_dst}")
+        shutil.copytree(src_backup_src, src_backup_dst)
+
     if cfg.get("train"):
+        ckpt_path = cfg.get("ckpt_path")
+
+        # Auto-resume from last checkpoint if available (e.g., after SLURM requeue).
+        # When SLURMEnvironment.auto_requeue saves a checkpoint before timeout,
+        # we need to detect it and pass it to trainer.fit() so that epoch counter,
+        # optimizer state, and LR scheduler are correctly restored.
+        if ckpt_path is None:
+            for cb in callbacks:
+                if isinstance(cb, ModelCheckpoint) and cb.dirpath:
+                    last_ckpt = os.path.join(cb.dirpath, "last.ckpt")
+                    if os.path.exists(last_ckpt):
+                        ckpt_path = last_ckpt
+                        log.info(f"Auto-resuming from {ckpt_path}")
+                        # Signal model to skip pretrained weight loading
+                        model.resume_from_checkpoint = ckpt_path
+                    break
+
         log.info("Starting training!")
-        trainer.fit(model=model, datamodule=datamodule, ckpt_path=cfg.get("ckpt_path"))
+        trainer.fit(model=model, datamodule=datamodule, ckpt_path=ckpt_path)
 
     train_metrics = trainer.callback_metrics
 

@@ -1,3 +1,11 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# NVIDIA CORPORATION and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA CORPORATION is strictly prohibited.
+
 import os
 import glob
 from tqdm import tqdm
@@ -160,6 +168,37 @@ dataset_metadata = {
         "mask_path_seq_func": lambda mask_path, seq: None,
         "skip_condition": None,
         "process_func": lambda args, img_path: process_sintel(args, img_path),
+    },
+    "kitti_odom": {
+        "img_path": "data/kitti_data",
+        "mask_path": None,
+        "dir_path_func": lambda img_path, seq: os.path.join(img_path, "sequences", seq, "image_2"),
+        "gt_traj_func": lambda img_path, anno_path, seq: os.path.join(img_path, "poses", f"{seq}.txt"),
+        "traj_format": "kitti_odom",
+        "seq_list": ["00", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10"],
+        "full_seq": False,
+        "mask_path_seq_func": lambda mask_path, seq: None,
+        "skip_condition": None,
+        "process_func": None,
+    },
+    "vkitti": {
+        "img_path": "data/processed_vkitti",
+        "mask_path": None,
+        "dir_path_func": lambda img_path, seq: os.path.join(img_path, seq),
+        "gt_traj_func": lambda img_path, anno_path, seq: os.path.join(img_path, seq),
+        "traj_format": "vkitti",
+        "seq_list": [
+            "Scene01/clone/Camera_0",
+            "Scene02/clone/Camera_0",
+            "Scene06/clone/Camera_0",
+            "Scene18/clone/Camera_0",
+            "Scene20/clone/Camera_0",
+        ],
+        "full_seq": False,
+        "mask_path_seq_func": lambda mask_path, seq: None,
+        "skip_condition": None,
+        "process_func": None,
+        "img_filter": lambda name: name.endswith("_rgb.jpg"),
     },
 }
 

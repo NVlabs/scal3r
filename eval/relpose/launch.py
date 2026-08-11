@@ -1,3 +1,11 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# NVIDIA CORPORATION and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA CORPORATION is strictly prohibited.
+
 import os
 import sys
 import torch
@@ -74,6 +82,153 @@ def get_args_parser():
     )
 
     parser.add_argument("--freeze_state", action="store_true", default=False)
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="causal",
+        choices=["causal", "window", "full"],
+        help="attention mode for StreamSession",
+    )
+    parser.add_argument(
+        "--use_rel_pose",
+        action="store_true",
+        default=False,
+        help="Use accumulated relative poses instead of pose_enc for evaluation",
+    )
+    parser.add_argument(
+        "--max_ref_frames",
+        type=int,
+        default=4,
+        help="Max reference frames for CUT3R-style multi-ref pose",
+    )
+    parser.add_argument(
+        "--use_pgo",
+        action="store_true",
+        default=False,
+        help="Use PGO for pose optimization during streaming inference",
+    )
+    parser.add_argument(
+        "--kf_window",
+        type=int,
+        default=4,
+        help="Keyframe window size for PGO buffer",
+    )
+    parser.add_argument(
+        "--nkf_buffer_size",
+        type=int,
+        default=0,
+        help="Number of recent non-keyframes to keep in ref buffer (default: 0)",
+    )
+    parser.add_argument(
+        "--no_pgo",
+        action="store_true",
+        default=False,
+        help="Disable PGO, use chain accumulation only",
+    )
+    parser.add_argument(
+        "--kf_only_cache",
+        action="store_true",
+        default=False,
+        help="Only keyframes update KV cache (window mode)",
+    )
+    parser.add_argument(
+        "--num_init_frames",
+        type=int,
+        default=5,
+        help="Number of initial frames treated as keyframes",
+    )
+    parser.add_argument(
+        "--pgo_sigma_rot",
+        type=float,
+        default=None,
+        help="PGO rotation sigma (default: 0.5)",
+    )
+    parser.add_argument(
+        "--pgo_sigma_trans",
+        type=float,
+        default=None,
+        help="PGO translation sigma (default: 0.5)",
+    )
+    parser.add_argument(
+        "--pgo_mode",
+        type=str,
+        default=None,
+        choices=["huber", "cauchy", "tukey", "dcs", None],
+        help="PGO robust kernel",
+    )
+    parser.add_argument(
+        "--pgo_max_edges",
+        type=int,
+        default=0,
+        help="Max PGO edges per frame (0=unlimited)",
+    )
+    parser.add_argument(
+        "--reset_interval",
+        type=int,
+        default=1000000,
+        help="Reset recurrent state every N frames with 1 overlap frame (default: disabled)",
+    )
+    parser.add_argument(
+        "--use_global_pose_init",
+        action="store_true",
+        default=False,
+        help="Use pose_enc (global pose) as PGO initialization",
+    )
+    parser.add_argument(
+        "--global_pose_prior_sigma",
+        type=float,
+        default=None,
+        help="If set, add PriorFactorPose3 with this sigma for global pose (e.g. 0.1)",
+    )
+    # Loop closure arguments
+    parser.add_argument(
+        "--loop_closure",
+        action="store_true",
+        default=False,
+        help="Enable online loop closure detection during inference",
+    )
+    parser.add_argument(
+        "--loop_similarity_threshold",
+        type=float,
+        default=0.85,
+        help="Cosine similarity threshold for loop detection (higher = fewer but more reliable)",
+    )
+    parser.add_argument(
+        "--loop_temporal_gap",
+        type=int,
+        default=300,
+        help="Minimum frame gap for loop closure candidates",
+    )
+    parser.add_argument(
+        "--loop_max_per_frame",
+        type=int,
+        default=1,
+        help="Maximum number of loop closure frames to inject per keyframe",
+    )
+    parser.add_argument(
+        "--loop_nms_window",
+        type=int,
+        default=50,
+        help="NMS window: suppress loop if query/target both within this many frames of a recent loop",
+    )
+    parser.add_argument(
+        "--loop_max_translation",
+        type=float,
+        default=20.0,
+        help="Geometric verification: reject loop edges with predicted translation > this (meters)",
+    )
+    parser.add_argument(
+        "--loop_gt",
+        action="store_true",
+        default=False,
+        help="Use GT poses for loop detection (ablation only, not for real eval)",
+    )
+    parser.add_argument(
+        "--loop_sigma_scale",
+        type=float,
+        default=1.0,
+        help="Sigma scale for loop closure constraints (lower = tighter snap)",
+    )
     return parser
 
 
@@ -107,10 +262,38 @@ def eval_pose_estimation_dist(args,
     model.to(distributed_state.device)
     device = distributed_state.device
 
+    # Loop closure detector (loaded once, reused across sequences)
+    loop_detector = None
+    if args.loop_closure and not args.loop_gt:
+        from stream3r.utils.loop_closure import OnlineLoopDetector
+        loop_detector = OnlineLoopDetector(
+            device=device,
+            similarity_threshold=args.loop_similarity_threshold,
+            temporal_gap=args.loop_temporal_gap,
+            max_loops_per_frame=args.loop_max_per_frame,
+            nms_window=args.loop_nms_window,
+        )
+        print(f"Loop closure enabled: threshold={args.loop_similarity_threshold}, "
+              f"gap={args.loop_temporal_gap}, max_per_frame={args.loop_max_per_frame}")
+    elif args.loop_closure and args.loop_gt:
+        print("Loop closure enabled: GT detection mode (ablation)")
+
+    def _build_view_image_paths(img_paths, reset_interval):
+        """Build view-indexed image path list that accounts for overlap frames.
+        reset logic inserts an overlap frame after every reset_interval frames.
+        This maps view_idx -> original image path."""
+        result = []
+        for i, path in enumerate(img_paths):
+            result.append(path)
+            if (i + 1) % reset_interval == 0:
+                result.append(path)  # overlap frame uses same image
+        return result
+
     with distributed_state.split_between_processes(seq_list) as seqs:
         ate_list = []
         rpe_trans_list = []
         rpe_rot_list = []
+        os.makedirs(save_dir, exist_ok=True)
         error_log_path = f"{save_dir}/_error_log_{distributed_state.process_index}.txt"  # Unique log file per process
         for seq in tqdm(seqs):
             try:
@@ -126,18 +309,31 @@ def eval_pose_estimation_dist(args,
                                                   lambda mask_path, seq: None)
                 mask_path_seq = mask_path_seq_func(mask_path, seq)
 
+                img_filter = metadata.get("img_filter", None)
                 filelist = [
                     os.path.join(dir_path, name)
                     for name in os.listdir(dir_path)
+                    if img_filter is None or img_filter(name)
                 ]
                 filelist.sort()
                 filelist = filelist[::args.pose_eval_stride]
+
+                # Filter out frames with non-finite GT poses (e.g. ScanNet tracking failures)
+                gt_traj_file = metadata["gt_traj_func"](img_path, anno_path, seq)
+                traj_format = metadata.get("traj_format", None)
+                if traj_format == "replica" and gt_traj_file is not None and os.path.exists(gt_traj_file):
+                    gt_poses_raw = np.loadtxt(gt_traj_file)
+                    valid_mask = np.isfinite(gt_poses_raw).all(axis=1)
+                    if not valid_mask.all():
+                        n_invalid = (~valid_mask).sum()
+                        print(f"Warning: {seq} has {n_invalid} non-finite GT poses, skipping those frames.")
+                        filelist = [f for f, v in zip(filelist, valid_mask) if v]
 
                 images = load_images(
                     filelist,
                     size=518,
                     verbose=True,
-                    crop=False,
+                    crop=True,
                     patch_size=14,
                 )
 
@@ -146,16 +342,128 @@ def eval_pose_estimation_dist(args,
                 images = ImgDust3r2Stream3r(images).to(device)
 
                 with torch.no_grad():
-                    session = StreamSession(model, mode="causal")
-                    for i in range(images.shape[1]):
+                    # Enable PGO by default when using rel_pose (matches CUT3R)
+                    no_pgo = args.no_pgo
+                    kf_only_cache = args.kf_only_cache
+                    use_pgo = (args.use_pgo or args.use_rel_pose) and not no_pgo
+                    # kf_only_cache needs PGO callbacks for keyframe selection,
+                    # even when --no_pgo is set (no_pgo only disables PGO poses)
+                    use_pgo_session = use_pgo or kf_only_cache
+                    pgo_config = dict(
+                        kf_pgo=use_pgo_session,
+                        kf_window=args.kf_window,
+                        nkf_buffer_size=args.nkf_buffer_size,
+                        num_init_frames=args.num_init_frames,
+                        kf_only_cache=kf_only_cache,
+                    ) if use_pgo_session else None
+                    if pgo_config is not None:
+                        if args.pgo_sigma_rot is not None:
+                            pgo_config['pgo_sigma_rot'] = args.pgo_sigma_rot
+                        if args.pgo_sigma_trans is not None:
+                            pgo_config['pgo_sigma_trans'] = args.pgo_sigma_trans
+                        if args.pgo_max_edges > 0:
+                            pgo_config['pgo_max_edges'] = args.pgo_max_edges
+                        if args.pgo_mode is not None:
+                            pgo_config['pgo_mode'] = args.pgo_mode
+                        if args.use_global_pose_init:
+                            pgo_config['use_global_pose_init'] = True
+                            if args.global_pose_prior_sigma is not None:
+                                pgo_config['global_pose_prior_sigma'] = args.global_pose_prior_sigma
+
+                    # Loop closure: set up per-sequence detector and image paths
+                    seq_loop_detector = loop_detector  # SALAD detector (shared across seqs)
+                    reset_interval = args.reset_interval
+                    if args.loop_closure and args.loop_gt:
+                        from stream3r.utils.loop_closure import GTLoopDetector
+                        gt_file = metadata["gt_traj_func"](img_path, anno_path, seq)
+                        if gt_file and os.path.isfile(gt_file):
+                            seq_loop_detector = GTLoopDetector(
+                                gt_poses_file=gt_file,
+                                temporal_gap=args.loop_temporal_gap,
+                                max_loops_per_frame=args.loop_max_per_frame,
+                                nms_window=args.loop_nms_window,
+                                reset_interval=reset_interval,
+                            )
+                            print(f"  GT loop detector for {seq}: {gt_file}")
+                    if seq_loop_detector is not None:
+                        seq_loop_detector.reset()
+                    if pgo_config is not None and seq_loop_detector is not None:
+                        pgo_config['loop_detector'] = seq_loop_detector
+                        pgo_config['loop_image_paths'] = _build_view_image_paths(filelist, reset_interval)
+                        pgo_config['loop_max_translation'] = args.loop_max_translation
+                        pgo_config['loop_sigma_scale'] = args.loop_sigma_scale
+
+                    session = StreamSession(model, mode=args.mode,
+                                            use_pgo=use_pgo_session, pgo_config=pgo_config,
+                                            max_ref_frames=args.max_ref_frames)
+                    overlap_indices = []  # global prediction indices of overlap frames
+                    num_frames = images.shape[1]
+                    for i in range(num_frames):
                         image = images[:, i:i+1]
                         predictions = session.forward_stream(image)
 
-                extrinsic, _ = pose_encoding_to_extri_intri(predictions["pose_enc"], predictions["images"].shape[-2:])
+                        # Reset streaming state after every reset_interval frames
+                        if (i + 1) % reset_interval == 0 and (i + 1) < num_frames:
+                            session.reset_streaming_state()
+                            # Re-feed current frame as overlap (first frame of new segment)
+                            predictions = session.forward_stream(image)
+                            # Mark this overlap prediction for removal
+                            overlap_indices.append(session.frame_count - 1)
 
-                pr_poses = []
-                for i in range(extrinsic.shape[1]):
-                    pr_poses.append(inv(torch.cat([extrinsic[0, i], torch.tensor([[0, 0, 0, 1]], device=device)], dim=0)))
+                # Print keyframe stats for this sequence
+                if use_pgo_session and hasattr(session, 'on_frame_processed') and hasattr(session.on_frame_processed, 'print_kf_stats'):
+                    session.on_frame_processed.print_kf_stats()
+
+                if args.use_rel_pose and "rel_pose" in predictions:
+                    # Try PGO poses first, unless --no_pgo forces chain accumulation
+                    # NOTE: get_pgo_poses() calls finalize() BEFORE overlap removal
+                    # (matching CUT3R: finalize with all frames, then remove overlaps)
+                    pgo_poses = session.get_pgo_poses() if not no_pgo else None
+
+                    # Remove overlap frames AFTER finalize (CUT3R: prepare_output removes after finalize)
+                    if overlap_indices and pgo_poses is not None:
+                        keep_mask = [True] * session.frame_count
+                        for oi in overlap_indices:
+                            keep_mask[oi] = False
+                        pgo_poses = [p for p, keep in zip(pgo_poses, keep_mask) if keep]
+
+                    if pgo_poses is not None:
+                        pr_poses = [p[0] for p in pgo_poses]
+                    else:
+                        # Fallback: multi-ref chain accumulation (K varies per frame)
+                        from stream3r.utils.pgo import _se3_inverse, _reorthogonalize_c2w
+                        rel_pose_list = predictions["rel_pose"]
+                        if not isinstance(rel_pose_list, list):
+                            rel_pose_list = [rel_pose_list]
+                        c2w_init = torch.eye(4, device=device).unsqueeze(0)
+                        c2w_history = {0: c2w_init}
+                        pr_poses = [c2w_init[0]]
+                        for fi in range(1, len(rel_pose_list)):
+                            rp = rel_pose_list[fi]
+                            rt = rp["rel_trans"]  # [B, 1, K_i, 3]
+                            rr = rp["rel_rot"]    # [B, 1, K_i, 3, 3]
+                            K_i = rt.shape[2]
+                            c2w_i = None
+                            for k in range(K_i):
+                                ref_idx = fi - k - 1
+                                if ref_idx < 0 or ref_idx not in c2w_history:
+                                    continue
+                                T_rel = torch.eye(4, device=device, dtype=rr.dtype)
+                                T_rel[:3, :3] = rr[0, 0, k]
+                                T_rel[:3, 3] = rt[0, 0, k]
+                                c2w_i = c2w_history[ref_idx] @ _se3_inverse(T_rel).unsqueeze(0)
+                                c2w_i[0] = _reorthogonalize_c2w(c2w_i[0])
+                                break
+                            if c2w_i is None:
+                                c2w_i = c2w_history.get(fi - 1, c2w_init).clone()
+                            c2w_history[fi] = c2w_i
+                            pr_poses.append(c2w_i[0])
+                else:
+                    extrinsic, _ = pose_encoding_to_extri_intri(predictions["pose_enc"], predictions["images"].shape[-2:])
+
+                    pr_poses = []
+                    for i in range(extrinsic.shape[1]):
+                        pr_poses.append(inv(torch.cat([extrinsic[0, i], torch.tensor([[0, 0, 0, 1]], device=device)], dim=0)))
 
                 pred_traj = get_tum_poses(pr_poses)
                 os.makedirs(f"{save_dir}/{seq}", exist_ok=True)
@@ -163,7 +471,6 @@ def eval_pose_estimation_dist(args,
 
                 gt_traj_file = metadata["gt_traj_func"](img_path, anno_path,
                                                         seq)
-                traj_format = metadata.get("traj_format", None)
 
                 if args.eval_dataset == "sintel":
                     gt_traj = load_traj(gt_traj_file=gt_traj_file,
@@ -262,7 +569,7 @@ def main():
     args.full_seq = False
     args.no_crop = False
 
-    model = STream3R.from_pretrained("yslan/STream3R").to(args.device)
+    model = STream3R.from_pretrained("nvidia/scal3r").to(args.device)
     model.eval()
 
     eval_pose_estimation(args, model, save_dir=args.output_dir)

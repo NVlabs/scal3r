@@ -115,7 +115,7 @@ class MultiViewDUSt3RDataModule(LightningDataModule):
             shuffle=True,
             drop_last=True,
             multiprocessing_context="spawn" if isinstance(self.trainer.strategy, DeepSpeedStrategy) else None,  # for DeepSpeed ZeRO-2, for some reason the default fork context doesn't work - it would cause a "cannot allocate memory" error 
-            persistent_workers=True if self.num_workers_val > 0 else False,
+            persistent_workers=True if self.num_workers > 0 else False,
         )
 
         # Set epoch for train and validation loaders (if applicable)

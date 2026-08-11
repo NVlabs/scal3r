@@ -1,3 +1,11 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# NVIDIA CORPORATION and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA CORPORATION is strictly prohibited.
+
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 #
@@ -8,10 +16,46 @@ from typing import List, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from stream3r.models.components.layers import Mlp
 from stream3r.models.components.layers.block import Block
 from stream3r.models.components.heads.head_act import activate_pose
+
+
+class RelativePoseDecoder(nn.Module):
+    """CUT3R-style per-token MLP decoder -> SE(3).
+
+    Each rel_pose token independently predicts a relative pose (3D translation + 3x3 rotation)
+    via a simple MLP(dim_in -> dim_in*4 -> 9). No attention pooling or FiLM modulation.
+    """
+
+    def __init__(self, dim_in: int = 2048, mlp_ratio: int = 4):
+        super().__init__()
+        self.mlp = Mlp(dim_in, int(dim_in * mlp_ratio), 9, drop=0)
+
+    def orthogonalize_rotation(self, R: torch.Tensor) -> torch.Tensor:
+        """Gram-Schmidt: (B, 2, 3) -> (B, 3, 3)."""
+        x = F.normalize(R[:, 0], dim=-1)
+        z = F.normalize(torch.cross(x, R[:, 1], dim=-1), dim=-1)
+        y = torch.cross(z, x, dim=-1)
+        return torch.stack([x, y, z], dim=1)
+
+    def forward(self, rel_pose_tokens: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Args:
+            rel_pose_tokens: [B, S, K, C] - K prompt tokens per frame
+
+        Returns:
+            rel_trans: [B, S, K, 3] - relative translation per token
+            rel_rot: [B, S, K, 3, 3] - relative rotation per token
+        """
+        B, S, K, C = rel_pose_tokens.shape
+        pred = self.mlp(rel_pose_tokens.reshape(B * S * K, C).float()).reshape(B, S, K, 9)
+        rel_trans = pred[..., :3]
+        rot_6d = pred[..., 3:9].reshape(B * S * K, 2, 3)
+        rel_rot = self.orthogonalize_rotation(rot_6d).reshape(B, S, K, 3, 3)
+        return rel_trans, rel_rot
 
 
 class CameraHead(nn.Module):
@@ -32,6 +76,8 @@ class CameraHead(nn.Module):
         trans_act: str = "linear",
         quat_act: str = "linear",
         fl_act: str = "relu",  # Field of view activations: ensures FOV values are positive.
+        # Relative pose prompt parameters
+        use_rel_pose_prompt: bool = False,
     ):
         super().__init__()
 
@@ -39,6 +85,13 @@ class CameraHead(nn.Module):
             self.target_dim = 9
         else:
             raise ValueError(f"Unsupported camera encoding type: {pose_encoding_type}")
+
+        # CUT3R-style per-token MLP decoder (rel_pose tokens use the full concat dim)
+        self.use_rel_pose_prompt = use_rel_pose_prompt
+        if use_rel_pose_prompt:
+            self.rel_pose_decoder = RelativePoseDecoder(dim_in=dim_in)
+        else:
+            self.rel_pose_decoder = None
 
         self.trans_act = trans_act
         self.quat_act = quat_act
@@ -107,8 +160,9 @@ class CameraHead(nn.Module):
         aggregated_tokens_list: list,
         num_iterations: int = 4,
         mode: str = "causal",
-        kv_cache_list: List[List[List[torch.Tensor]]] = None
-    ) -> list:
+        kv_cache_list: List[List[List[torch.Tensor]]] = None,
+        num_rel_pose_tokens: int = 0,
+    ):
         """
         Forward pass to predict camera parameters.
 
@@ -117,17 +171,27 @@ class CameraHead(nn.Module):
                 the last tensor is used for prediction.
             num_iterations (int, optional): Number of iterative refinement steps. Defaults to 4.
             mode (str): Global attention mode, could be either "causal", "window" or "full"
-            kv_cache_list (List[List[List[torch.Tensor]]]): List of cached key-value pairs for 
-                each iterations and each attention layer of the camera head 
+            kv_cache_list (List[List[List[torch.Tensor]]]): List of cached key-value pairs for
+                each iterations and each attention layer of the camera head
+            num_rel_pose_tokens (int): Number of rel_pose tokens at the end of token sequence
 
         Returns:
-            list: A list of predicted camera encodings (post-activation) from each iteration.
+            If use_rel_pose_prompt:
+                tuple: (pred_pose_enc_list, rel_pose_dict, [kv_cache_list])
+            Else:
+                list or tuple: predicted camera encodings, optionally with kv_cache_list.
         """
         # Use tokens from the last block for camera prediction.
-        tokens = aggregated_tokens_list[-1]
+        tokens = aggregated_tokens_list[-1]  # [B, S, P, C]
 
-        # Extract the camera tokens
-        pose_tokens = tokens[:, :, 0]
+        # Extract the camera tokens (always at position 0)
+        pose_tokens = tokens[:, :, 0]  # [B, S, C]
+
+        # Extract rel_pose_tokens if enabled (at the end of token sequence)
+        rel_pose_tokens = None
+        if self.use_rel_pose_prompt and num_rel_pose_tokens > 0:
+            rel_pose_tokens = tokens[:, :, -num_rel_pose_tokens:]  # [B, S, K, C]
+
         pose_tokens = self.token_norm(pose_tokens)
 
         B, S, C = pose_tokens.shape
@@ -136,6 +200,25 @@ class CameraHead(nn.Module):
             attn_mask = self._create_attn_mask(S, mode, pose_tokens.dtype, pose_tokens.device)
 
         pred_pose_enc_list = self.trunk_fn(pose_tokens, num_iterations, attn_mask, kv_cache_list)
+
+        # CUT3R-style per-token MLP decode (no prev_pose_token needed)
+        rel_pose_dict = None
+        if self.rel_pose_decoder is not None and rel_pose_tokens is not None:
+            rel_trans, rel_rot = self.rel_pose_decoder(rel_pose_tokens)
+            rel_pose_dict = {
+                'rel_trans': rel_trans,   # [B, S, K, 3]
+                'rel_rot': rel_rot,       # [B, S, K, 3, 3]
+            }
+
+        # Handle return based on kv_cache and rel_pose
+        if kv_cache_list is not None:
+            pred_pose_enc_list, kv_cache_list = pred_pose_enc_list
+            if rel_pose_dict is not None:
+                return pred_pose_enc_list, rel_pose_dict, kv_cache_list
+            return pred_pose_enc_list, kv_cache_list
+
+        if rel_pose_dict is not None:
+            return pred_pose_enc_list, rel_pose_dict
         return pred_pose_enc_list
 
     def trunk_fn(self, pose_tokens: torch.Tensor, num_iterations: int, attn_mask: torch.Tensor, kv_cache_list: List[Tuple[torch.Tensor, torch.Tensor]] = None) -> list:

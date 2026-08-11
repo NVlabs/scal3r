@@ -1,3 +1,11 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# NVIDIA CORPORATION and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA CORPORATION is strictly prohibited.
+
 import torch
 from torch.utils.data.distributed import DistributedSampler
 
@@ -29,6 +37,7 @@ from .smartportraits import SmartPortraits_Multi
 from .spring import Spring
 from .synscapes import SynScapes
 from .tartanair import TartanAir_Multi
+from .tartanair_wds import TartanAirWds_Multi
 from .threedkb import ThreeDKenBurns
 from .uasol import UASOL_Multi
 from .urbansyn import UrbanSyn
@@ -42,6 +51,37 @@ from .habitat import Habitat
 from .project_aria_seq import Aria_Seq
 
 
+def _find_warmup_datasets(dataset):
+    """Recursively find all datasets needing warmup (WDS) through wrappers."""
+    if isinstance(dataset, TartanAirWds_Multi):
+        yield dataset
+    elif hasattr(dataset, 'dataset'):  # ResizedDataset, MulDataset
+        yield from _find_warmup_datasets(dataset.dataset)
+    elif hasattr(dataset, 'datasets'):  # CatDataset
+        for ds in dataset.datasets:
+            yield from _find_warmup_datasets(ds)
+
+
+class _WarmupWorkerInitFn:
+    """Picklable worker_init_fn that pre-opens file handles after fork/spawn.
+    A callable class instead of a closure so it works with spawn context."""
+
+    def __init__(self, warmup_datasets):
+        self.warmup_datasets = warmup_datasets
+
+    def __call__(self, worker_id):
+        for ds in self.warmup_datasets:
+            ds.warmup_fh_cache()
+
+
+def _make_warmup_worker_init_fn(dataset):
+    """Create a worker_init_fn that pre-opens file handles after fork/spawn."""
+    warmup_datasets = list(_find_warmup_datasets(dataset))
+    if not warmup_datasets:
+        return None
+    return _WarmupWorkerInitFn(warmup_datasets)
+
+
 def get_data_loader(dataset, batch_size, num_workers=8, shuffle=True, drop_last=True, pin_mem=True, persistent_workers=False, multiprocessing_context=None):
     import torch
     from croco.utils.misc import get_world_size, get_rank
@@ -49,6 +89,8 @@ def get_data_loader(dataset, batch_size, num_workers=8, shuffle=True, drop_last=
     # pytorch dataset
     if isinstance(dataset, str):
         dataset = eval(dataset)
+
+    worker_init_fn = _make_warmup_worker_init_fn(dataset)
 
     world_size = get_world_size()
     rank = get_rank()
@@ -75,6 +117,8 @@ def get_data_loader(dataset, batch_size, num_workers=8, shuffle=True, drop_last=
         pin_memory=pin_mem,
         drop_last=drop_last,
         persistent_workers=persistent_workers,
+        prefetch_factor=8 if num_workers > 0 else None,
+        worker_init_fn=worker_init_fn,
         multiprocessing_context=multiprocessing_context,
     )
 
