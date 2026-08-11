@@ -1,3 +1,11 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# NVIDIA CORPORATION and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA CORPORATION is strictly prohibited.
+
 # Copyright (C) 2024-present Naver Corporation. All rights reserved.
 # Licensed under CC BY-NC-SA 4.0 (non-commercial use only).
 #
@@ -99,7 +107,7 @@ class Attention(nn.Module):
         self.proj_drop = nn.Dropout(proj_drop)
         self.rope = rope.float() if rope is not None else None
 
-    def forward(self, x, xpos):
+    def forward(self, x, xpos, n_query_suffix=0):
         B, N, C = x.shape
 
         qkv = (
@@ -119,6 +127,11 @@ class Attention(nn.Module):
                 k = self.rope(k, xpos)
             q = q.to(q_type)
             k = k.to(k_type)
+
+        # VQT-style asymmetric attention: exclude trailing query-only tokens from K/V
+        if n_query_suffix > 0:
+            k = k[:, :, :-n_query_suffix, :]
+            v = v[:, :, :-n_query_suffix, :]
 
         x = (
             scaled_dot_product_attention(
@@ -194,7 +207,14 @@ class CrossAttention(nn.Module):
 
         self.rope = rope.float() if rope is not None else None
 
-    def forward(self, query, key, value, qpos, kpos):
+    def forward(self, query, key, value, qpos, kpos, n_kv_suffix_exclude=0):
+        # VQT-style asymmetric attention: exclude trailing tokens from K/V before projection
+        if n_kv_suffix_exclude > 0:
+            key = key[:, :-n_kv_suffix_exclude, :]
+            value = value[:, :-n_kv_suffix_exclude, :]
+            if kpos is not None:
+                kpos = kpos[:, :-n_kv_suffix_exclude, :].contiguous()
+
         B, Nq, C = query.shape
         Nk = key.shape[1]
         Nv = value.shape[1]
@@ -289,10 +309,10 @@ class DecoderBlock(nn.Module):
         )
         self.norm_y = norm_layer(dim) if norm_mem else nn.Identity()
 
-    def forward(self, x, y, xpos, ypos):
-        x = x + self.drop_path(self.attn(self.norm1(x), xpos))
+    def forward(self, x, y, xpos, ypos, n_query_suffix=0, n_cross_kv_suffix_exclude=0):
+        x = x + self.drop_path(self.attn(self.norm1(x), xpos, n_query_suffix=n_query_suffix))
         y_ = self.norm_y(y)
-        x = x + self.drop_path(self.cross_attn(self.norm2(x), y_, y_, xpos, ypos))
+        x = x + self.drop_path(self.cross_attn(self.norm2(x), y_, y_, xpos, ypos, n_kv_suffix_exclude=n_cross_kv_suffix_exclude))
         x = x + self.drop_path(self.mlp(self.norm3(x)))
         return x, y
 

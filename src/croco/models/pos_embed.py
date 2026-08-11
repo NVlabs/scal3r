@@ -1,3 +1,11 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# NVIDIA CORPORATION and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA CORPORATION is strictly prohibited.
+
 # Copyright (C) 2022-present Naver Corporation. All rights reserved.
 # Licensed under CC BY-NC-SA 4.0 (non-commercial use only).
 
@@ -151,9 +159,29 @@ except ImportError:
 
         def apply_rope1d(self, tokens, pos1d, cos, sin):
             assert pos1d.ndim == 2
-            cos = torch.nn.functional.embedding(pos1d, cos)[:, None, :, :]
-            sin = torch.nn.functional.embedding(pos1d, sin)[:, None, :, :]
-            return (tokens * cos) + (self.rotate_half(tokens) * sin)
+            # Handle negative positions (special tokens like pose_token, rel_pose_token)
+            # These tokens should not receive position encoding
+            valid_mask = pos1d >= 0  # Shape: (B, N)
+            
+            if valid_mask.all():
+                # All positions are valid, use original fast path
+                cos_emb = torch.nn.functional.embedding(pos1d, cos)[:, None, :, :]
+                sin_emb = torch.nn.functional.embedding(pos1d, sin)[:, None, :, :]
+                return (tokens * cos_emb) + (self.rotate_half(tokens) * sin_emb)
+            
+            # Some positions are negative (special tokens)
+            # Clamp positions to valid range for embedding lookup
+            pos1d_clamped = pos1d.clamp(min=0)
+            cos_emb = torch.nn.functional.embedding(pos1d_clamped, cos)[:, None, :, :]
+            sin_emb = torch.nn.functional.embedding(pos1d_clamped, sin)[:, None, :, :]
+            
+            # Apply RoPE transformation
+            transformed = (tokens * cos_emb) + (self.rotate_half(tokens) * sin_emb)
+            
+            # For invalid positions (negative), keep original tokens unchanged
+            # valid_mask shape: (B, N) -> expand to (B, 1, N, 1) to broadcast with tokens (B, H, N, D)
+            valid_mask_expanded = valid_mask[:, None, :, None].expand_as(tokens)
+            return torch.where(valid_mask_expanded, transformed, tokens)
 
         def forward(self, tokens, positions):
             """

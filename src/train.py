@@ -1,3 +1,11 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# NVIDIA CORPORATION and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA CORPORATION is strictly prohibited.
+
 # --------------------------------------------------------
 # training code for CUT3R
 # --------------------------------------------------------
@@ -20,6 +28,8 @@ import torch
 import torch.backends.cudnn as cudnn
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
+
+from dust3r.utils.device import todevice
 
 torch.backends.cuda.matmul.allow_tf32 = True  # for gpu >= Ampere and pytorch >= 1.12
 
@@ -56,7 +66,7 @@ import torch.multiprocessing
 
 torch.multiprocessing.set_sharing_strategy("file_system")
 
-printer = get_logger(__name__, log_level="DEBUG")
+printer = get_logger(__name__, log_level="INFO")
 
 
 def setup_for_distributed(accelerator: Accelerator):
@@ -196,7 +206,7 @@ def train(args):
 
     if args.pretrained and not args.resume:
         printer.info(f"Loading pretrained: {args.pretrained}")
-        ckpt = torch.load(args.pretrained, map_location=device)
+        ckpt = torch.load(args.pretrained, map_location=device, weights_only=False)
         load_only_encoder = getattr(args, "load_only_encoder", False)
         if load_only_encoder:
             filtered_state_dict = {
@@ -584,6 +594,7 @@ def test_one_epoch(
     for _, batch in enumerate(
         metric_logger.log_every(data_loader, args.print_freq, accelerator, header)
     ):
+        batch = todevice(batch, device)
         result = loss_of_one_batch(
             batch,
             model,
@@ -794,9 +805,14 @@ def get_vis_imgs_new(loss_details, num_imgs_vis, num_views, is_metric):
     for i in range(0, num_views, stride):
         gt_imgs = 0.5 * (loss_details[f"gt_img{i+1}"] + 1)[:num_imgs_vis].detach().cpu()
         width = gt_imgs.shape[2]
-        pred_imgs = (
-            0.5 * (loss_details[f"pred_rgb_{i+1}"] + 1)[:num_imgs_vis].detach().cpu()
-        )
+        # Handle case where RGBLoss is not used (pred_rgb not available)
+        if f"pred_rgb_{i+1}" in loss_details:
+            pred_imgs = (
+                0.5 * (loss_details[f"pred_rgb_{i+1}"] + 1)[:num_imgs_vis].detach().cpu()
+            )
+        else:
+            # Fallback: use zeros as placeholder when no RGB prediction
+            pred_imgs = torch.zeros_like(gt_imgs)
         gt_img_list = batch_append(gt_img_list, gt_imgs.unbind(dim=0))
         pred_img_list = batch_append(pred_img_list, pred_imgs.unbind(dim=0))
 
@@ -845,14 +861,27 @@ def get_vis_imgs_new(loss_details, num_imgs_vis, num_views, is_metric):
             )
             self_view_conf_exits = True
 
-        img_mask_list = batch_append(
-            img_mask_list,
-            loss_details[f"img_mask_{i+1}"][:num_imgs_vis].detach().cpu().unbind(dim=0),
-        )
-        ray_mask_list = batch_append(
-            ray_mask_list,
-            loss_details[f"ray_mask_{i+1}"][:num_imgs_vis].detach().cpu().unbind(dim=0),
-        )
+        if f"img_mask_{i+1}" in loss_details and f"ray_mask_{i+1}" in loss_details:
+            img_mask_list = batch_append(
+                img_mask_list,
+                loss_details[f"img_mask_{i+1}"][:num_imgs_vis].detach().cpu().unbind(dim=0),
+            )
+            ray_mask_list = batch_append(
+                ray_mask_list,
+                loss_details[f"ray_mask_{i+1}"][:num_imgs_vis].detach().cpu().unbind(dim=0),
+            )
+        else:
+            # Create placeholder masks (all False) when masks are not available
+            batch_size = gt_imgs.shape[0]
+            placeholder_mask = torch.zeros(batch_size, dtype=torch.bool)
+            img_mask_list = batch_append(
+                img_mask_list,
+                placeholder_mask.unbind(dim=0),
+            )
+            ray_mask_list = batch_append(
+                ray_mask_list,
+                placeholder_mask.unbind(dim=0),
+            )
 
     # each element in the list is [H, num_views * W, (3)], the size of the list is num_imgs_vis
     gt_img_list = [torch.cat(sublist, dim=1) for sublist in gt_img_list]

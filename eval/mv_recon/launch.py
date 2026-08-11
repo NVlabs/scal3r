@@ -1,3 +1,11 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# NVIDIA CORPORATION and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA CORPORATION is strictly prohibited.
+
 import os
 import sys
 
@@ -38,6 +46,31 @@ def get_args_parser():
     parser.add_argument("--size", type=int, default=512)
     parser.add_argument("--revisit", type=int, default=1, help="revisit times")
     parser.add_argument("--freeze", action="store_true")
+    parser.add_argument("--eval_datasets", type=str, nargs="+", default=None,
+                        help="datasets to evaluate on (default: all)")
+    parser.add_argument("--kf_every", type=int, default=200,
+                        help="keyframe sampling interval for 7scenes/NRGBD (1=dense video)")
+    parser.add_argument("--max_frames", type=int, default=0,
+                        help="Max frames per sequence (0=unlimited)")
+    # scal3r-specific arguments
+    parser.add_argument("--use_relative_pose", action="store_true", default=False,
+                        help="Use relative pose accumulation + PGO")
+    parser.add_argument("--skip_pgo", action="store_true", default=False,
+                        help="Skip PGO, use chain accumulation only")
+    parser.add_argument("--kf_window", type=int, default=4,
+                        help="Number of keyframes in buffer")
+    parser.add_argument("--nkf_buffer_size", type=int, default=0)
+    parser.add_argument("--pgo_sigma_rot", type=float, default=None)
+    parser.add_argument("--pgo_sigma_trans", type=float, default=None)
+    parser.add_argument("--max_ref_frames", type=int, default=None)
+    parser.add_argument("--use_pgo1_poses", action="store_true", default=False)
+    parser.add_argument("--use_online_pgo", action="store_true", default=False)
+    parser.add_argument("--final_batch_opt", action="store_true", default=False)
+    parser.add_argument("--reset_interval", type=int, default=1000000)
+    parser.add_argument("--scene_start", type=int, default=0,
+                        help="Start scene index (inclusive)")
+    parser.add_argument("--scene_end", type=int, default=999,
+                        help="End scene index (exclusive)")
     return parser
 
 
@@ -52,29 +85,31 @@ def main(args):
         resolution = 224
     else:
         raise NotImplementedError
-    datasets_all = {
-        "7scenes": SevenScenes(
+    eval_datasets = args.eval_datasets
+    datasets_all = {}
+    if eval_datasets is None or "7scenes" in eval_datasets:
+        datasets_all["7scenes"] = SevenScenes(
             split="test",
             ROOT="./data/7scenes",
             resolution=resolution,
             num_seq=1,
             full_video=True,
-            kf_every=200,
-        ),  # 20),
-        "NRGBD": NRGBD(
+            kf_every=args.kf_every,
+        )
+    if eval_datasets is None or "NRGBD" in eval_datasets:
+        datasets_all["NRGBD"] = NRGBD(
             split="test",
             ROOT="./data/neural_rgbd",
             resolution=resolution,
             num_seq=1,
             full_video=True,
-            kf_every=500,
-        ),
-    }
+            kf_every=args.kf_every,
+        )
 
     accelerator = Accelerator()
     device = accelerator.device
     model_name = args.model_name
-    if model_name == "ours" or model_name == "cut3r":
+    if model_name in ("ours", "cut3r", "scal3r"):
         from dust3r.model import ARCroco3DStereo
         from eval.mv_recon.criterion import Regr3D_t_ScaleShiftInv, L21
         from dust3r.utils.geometry import geotrf
@@ -82,6 +117,9 @@ def main(args):
 
         model = ARCroco3DStereo.from_pretrained(args.weights).to(device)
         model.eval()
+
+        from dust3r.inference import inference_recurrent
+        from dust3r.utils.pgo import make_kf_only_callbacks, accumulate_poses
     else:
         raise NotImplementedError
     os.makedirs(args.output_dir, exist_ok=True)
@@ -106,9 +144,12 @@ def main(args):
             fps_all = []
             time_all = []
 
-            with accelerator.split_between_processes(list(range(len(dataset)))) as idxs:
+            all_idxs = [i for i in range(len(dataset)) if args.scene_start <= i < args.scene_end]
+            with accelerator.split_between_processes(all_idxs) as idxs:
                 for data_idx in tqdm(idxs):
                     batch = default_collate([dataset[data_idx]])
+                    if args.max_frames > 0:
+                        batch = batch[:args.max_frames]
                     ignore_keys = set(
                         [
                             "depthmap",
@@ -133,101 +174,161 @@ def main(args):
                             else:
                                 view[name] = view[name].to(device, non_blocking=True)
 
-                    if model_name == "ours" or model_name == "cut3r":
-                        revisit = args.revisit
-                        update = not args.freeze
-                        if revisit > 1:
-                            # repeat input for 'revisit' times
-                            new_views = []
-                            for r in range(revisit):
-                                for i in range(len(batch)):
-                                    new_view = deepcopy(batch[i])
-                                    new_view["idx"] = [
-                                        (r * len(batch) + i)
-                                        for _ in range(len(batch[i]["idx"]))
-                                    ]
-                                    new_view["instance"] = [
-                                        str(r * len(batch) + i)
-                                        for _ in range(len(batch[i]["instance"]))
-                                    ]
-                                    if r > 0:
-                                        if not update:
-                                            new_view["update"] = torch.zeros_like(
-                                                batch[i]["update"]
-                                            ).bool()
-                                    new_views.append(new_view)
-                            batch = new_views
+                    if model_name in ("ours", "cut3r"):
+                        # CUT3R: inference_recurrent WITHOUT callbacks (vanilla, no buffer pruning)
+                        inf_views = []
+                        for i, view in enumerate(batch):
+                            inf_view = {
+                                "img": view["img"].cpu(),
+                                "ray_map": view["ray_map"].cpu(),
+                                "true_shape": view["true_shape"].cpu(),
+                                "idx": i,
+                                "instance": str(i),
+                                "camera_pose": view["camera_pose"].cpu(),
+                                "img_mask": view["img_mask"].cpu(),
+                                "ray_mask": view["ray_mask"].cpu(),
+                                "update": view["update"].cpu(),
+                                "reset": view.get("reset", torch.tensor(False).unsqueeze(0)),
+                            }
+                            inf_views.append(inf_view)
+
                         with torch.cuda.amp.autocast(enabled=False):
                             start = time.time()
-                            output = model(batch)
+                            outputs, _ = inference_recurrent(
+                                inf_views, model, device,
+                            )
                             end = time.time()
-                            preds, batch = output.ress, output.views
-                        valid_length = len(preds) // revisit
-                        preds = preds[-valid_length:]
-                        batch = batch[-valid_length:]
-                        fps = len(batch) / (end - start)
-                        print(
-                            f"Finished reconstruction for {name_data} {data_idx+1}/{len(dataset)}, FPS: {fps:.2f}"
+                            preds = outputs["pred"]
+
+                        # Move preds to device
+                        for i in range(len(preds)):
+                            for key in preds[i]:
+                                if isinstance(preds[i][key], torch.Tensor):
+                                    preds[i][key] = preds[i][key].to(device)
+
+                    elif model_name == "scal3r":
+                        # Scal3r: inference_recurrent + relative pose accumulation
+                        inf_views = []
+                        for i, view in enumerate(batch):
+                            inf_view = {
+                                "img": view["img"].cpu(),
+                                "ray_map": view["ray_map"].cpu(),
+                                "true_shape": view["true_shape"].cpu(),
+                                "idx": i,
+                                "instance": str(i),
+                                "camera_pose": torch.eye(4, dtype=torch.float32).unsqueeze(0),
+                                "img_mask": view["img_mask"].cpu(),
+                                "ray_mask": view["ray_mask"].cpu(),
+                                "update": view["update"].cpu(),
+                                "reset": torch.tensor((i + 1) % args.reset_interval == 0).unsqueeze(0),
+                            }
+                            inf_views.append(inf_view)
+
+                        ref_frame_indices_fn, on_frame_processed, keyframe_indices, buffer_pruning_fn = \
+                            make_kf_only_callbacks(
+                                kf_window=args.kf_window,
+                                nkf_buffer_size=args.nkf_buffer_size,
+                                max_ref_frames=(args.max_ref_frames if args.max_ref_frames is not None else 4),
+                                pgo_sigma_rot=args.pgo_sigma_rot,
+                                pgo_sigma_trans=args.pgo_sigma_trans,
+                                final_batch_opt=args.final_batch_opt,
+                            )
+
+                        with torch.cuda.amp.autocast(enabled=False):
+                            start = time.time()
+                            outputs, _ = inference_recurrent(
+                                inf_views, model, device,
+                                ref_frame_indices_fn=ref_frame_indices_fn,
+                                keyframe_indices=keyframe_indices,
+                                on_frame_processed=on_frame_processed,
+                                buffer_pruning_fn=buffer_pruning_fn,
+                            )
+                            end = time.time()
+                            preds = outputs["pred"]
+
+                        # Accumulate relative poses → global c2w
+                        accumulated_c2w = accumulate_poses(
+                            preds,
+                            views=outputs["views"],
+                            use_relative_pose=True if args.use_relative_pose else None,
+                            skip_pgo=args.skip_pgo,
+                            use_pgo1_poses=args.use_pgo1_poses,
+                            use_online_pgo=args.use_online_pgo,
+                            pgo_sigma_rot=args.pgo_sigma_rot,
+                            pgo_sigma_trans=args.pgo_sigma_trans,
                         )
-                        # continue
-                        fps_all.append(fps)
-                        time_all.append(end - start)
+                        # Replace pts3d_in_other_view with c2w-transformed pts
+                        for i in range(len(preds)):
+                            pts3d_self = preds[i]["pts3d_in_self_view"]
+                            c2w_i = accumulated_c2w[i]
+                            preds[i]["pts3d_in_other_view"] = geotrf(c2w_i, pts3d_self)
 
-                        # Evaluation
-                        print(f"Evaluation for {name_data} {data_idx+1}/{len(dataset)}")
-                        gt_pts, pred_pts, gt_factor, pr_factor, masks, monitoring = (
-                            criterion.get_all_pts3d_t(batch, preds)
-                        )
-                        pred_scale, gt_scale, pred_shift_z, gt_shift_z = (
-                            monitoring["pred_scale"],
-                            monitoring["gt_scale"],
-                            monitoring["pred_shift_z"],
-                            monitoring["gt_shift_z"],
-                        )
+                        # Move preds to device (criterion expects same device as batch)
+                        for i in range(len(preds)):
+                            for key in preds[i]:
+                                if isinstance(preds[i][key], torch.Tensor):
+                                    preds[i][key] = preds[i][key].to(device)
 
-                        in_camera1 = None
-                        pts_all = []
-                        pts_gt_all = []
-                        images_all = []
-                        masks_all = []
-                        conf_all = []
+                    fps = len(batch) / (end - start)
+                    print(
+                        f"Finished reconstruction for {name_data} {data_idx+1}/{len(dataset)}, FPS: {fps:.2f}"
+                    )
+                    fps_all.append(fps)
+                    time_all.append(end - start)
 
-                        for j, view in enumerate(batch):
-                            if in_camera1 is None:
-                                in_camera1 = view["camera_pose"][0].cpu()
+                    # Evaluation (shared for all models)
+                    print(f"Evaluation for {name_data} {data_idx+1}/{len(dataset)}")
+                    gt_pts, pred_pts, gt_factor, pr_factor, masks, monitoring = (
+                        criterion.get_all_pts3d_t(batch, preds)
+                    )
+                    pred_scale, gt_scale, pred_shift_z, gt_shift_z = (
+                        monitoring["pred_scale"],
+                        monitoring["gt_scale"],
+                        monitoring["pred_shift_z"],
+                        monitoring["gt_shift_z"],
+                    )
 
-                            image = view["img"].permute(0, 2, 3, 1).cpu().numpy()[0]
-                            mask = view["valid_mask"].cpu().numpy()[0]
+                    in_camera1 = None
+                    pts_all = []
+                    pts_gt_all = []
+                    images_all = []
+                    masks_all = []
+                    conf_all = []
 
-                            # pts = preds[j]['pts3d' if j==0 else 'pts3d_in_other_view'].detach().cpu().numpy()[0]
-                            pts = pred_pts[j].cpu().numpy()[0]
-                            conf = preds[j]["conf"].cpu().data.numpy()[0]
-                            # mask = mask & (conf > 1.8)
+                    for j, view in enumerate(batch):
+                        if in_camera1 is None:
+                            in_camera1 = view["camera_pose"][0].cpu()
 
-                            pts_gt = gt_pts[j].detach().cpu().numpy()[0]
+                        image = view["img"].permute(0, 2, 3, 1).cpu().numpy()[0]
+                        mask = view["valid_mask"].cpu().numpy()[0]
 
-                            H, W = image.shape[:2]
-                            cx = W // 2
-                            cy = H // 2
-                            l, t = cx - 112, cy - 112
-                            r, b = cx + 112, cy + 112
-                            image = image[t:b, l:r]
-                            mask = mask[t:b, l:r]
-                            pts = pts[t:b, l:r]
-                            pts_gt = pts_gt[t:b, l:r]
+                        pts = pred_pts[j].cpu().numpy()[0]
+                        conf = preds[j]["conf"].cpu().data.numpy()[0]
 
-                            #### Align predicted 3D points to the ground truth
-                            pts[..., -1] += gt_shift_z.cpu().numpy().item()
-                            pts = geotrf(in_camera1, pts)
+                        pts_gt = gt_pts[j].detach().cpu().numpy()[0]
 
-                            pts_gt[..., -1] += gt_shift_z.cpu().numpy().item()
-                            pts_gt = geotrf(in_camera1, pts_gt)
+                        H, W = image.shape[:2]
+                        cx = W // 2
+                        cy = H // 2
+                        l, t = cx - 112, cy - 112
+                        r, b = cx + 112, cy + 112
+                        image = image[t:b, l:r]
+                        mask = mask[t:b, l:r]
+                        pts = pts[t:b, l:r]
+                        pts_gt = pts_gt[t:b, l:r]
 
-                            images_all.append((image[None, ...] + 1.0) / 2.0)
-                            pts_all.append(pts[None, ...])
-                            pts_gt_all.append(pts_gt[None, ...])
-                            masks_all.append(mask[None, ...])
-                            conf_all.append(conf[None, ...])
+                        #### Align predicted 3D points to the ground truth
+                        pts[..., -1] += gt_shift_z.cpu().numpy().item()
+                        pts = geotrf(in_camera1, pts)
+
+                        pts_gt[..., -1] += gt_shift_z.cpu().numpy().item()
+                        pts_gt = geotrf(in_camera1, pts_gt)
+
+                        images_all.append((image[None, ...] + 1.0) / 2.0)
+                        pts_all.append(pts[None, ...])
+                        pts_gt_all.append(pts_gt[None, ...])
+                        masks_all.append(mask[None, ...])
+                        conf_all.append(conf[None, ...])
 
                     images_all = np.concatenate(images_all, axis=0)
                     pts_all = np.concatenate(pts_all, axis=0)

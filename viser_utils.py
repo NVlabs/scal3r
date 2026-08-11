@@ -1,3 +1,11 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# NVIDIA CORPORATION and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA CORPORATION is strictly prohibited.
+
 import torch
 import os
 from matplotlib.figure import Figure
@@ -7,6 +15,7 @@ import matplotlib as mpl
 import cv2
 import numpy as np
 import matplotlib.cm as cm
+import matplotlib.colors as mcolors
 import viser
 import viser.transforms as tf
 import time
@@ -337,9 +346,18 @@ class PointCloudViewer:
         port=8080,
         show_camera=True,
         vis_threshold=1,
-        size=512
+        size=512,
+        downsample_factor=1,
+        keyframe_indices=None,
+        cam_color_mode=None,
+        cam_color_split_frame=0,
+        gt_cam_dict=None,
+        max_total_points=0,
+        pts_opacity=1.0,
     ):
         self.model = model
+        self.max_total_points = max_total_points
+        self.pts_opacity = pts_opacity
         self.size=size
         self.state_args = state_args
         self.server = viser.ViserServer(port=port)
@@ -347,6 +365,11 @@ class PointCloudViewer:
         self.device = device
         self.conf_list = conf_list
         self.vis_threshold = vis_threshold
+        self.downsample_factor = downsample_factor
+        self.keyframe_indices = keyframe_indices or set()
+        self.cam_color_mode = cam_color_mode
+        self.cam_color_split_frame = cam_color_split_frame
+        self.gt_cam_dict = gt_cam_dict
         self.tt = lambda x: torch.from_numpy(x).float().to(device)
         self.pcs, self.all_steps = self.read_data(
             pc_list, color_list, conf_list, edge_color_list
@@ -402,6 +425,13 @@ class PointCloudViewer:
             step=0.0001,
             initial_value=0.005,
         )
+        self.opacity_slider = self.server.add_gui_slider(
+            "Opacity",
+            min=0.0,
+            max=1.0,
+            step=0.05,
+            initial_value=self.pts_opacity,
+        )
         self.camsize_slider = self.server.add_gui_slider(
             "Camera Size",
             min=0.01,
@@ -411,12 +441,19 @@ class PointCloudViewer:
         )
 
         self.pc_handles = []
+        self.pc_orig_colors = []
         self.cam_handles = []
 
         @self.psize_slider.on_update
         def _(_) -> None:
             for handle in self.pc_handles:
                 handle.point_size = self.psize_slider.value
+
+        @self.opacity_slider.on_update
+        def _(_) -> None:
+            a = self.opacity_slider.value
+            for handle, (_, orig_colors) in zip(self.pc_handles, self.pc_orig_colors):
+                handle.colors = np.clip(orig_colors * a + (1.0 - a), 0, 1)
 
         @self.camsize_slider.on_update
         def _(_) -> None:
@@ -549,7 +586,7 @@ class PointCloudViewer:
                 depthmap = output["pred"]["pts3d_in_self_view"].cpu().numpy()[0][..., -1]
                 conf = output["pred"]["conf"].cpu().numpy()
                 disp = 1.0 / depthmap
-                pts3ds, colors = self.parse_pc_data(pts3ds, colors, set_border_color=True)
+                pts3ds, colors = self.parse_pc_data(pts3ds, colors, set_border_color=True, downsample_factor=self.downsample_factor)
                 mask = (conf > 1.0).reshape(-1)
                 self.num_frames += 1
                 self.pc_handles.append(
@@ -626,7 +663,10 @@ class PointCloudViewer:
         conf=None,
         edge_color=[0.251, 0.702, 0.902],
         set_border_color=False,
+        downsample_factor=None,
     ):
+        if downsample_factor is None:
+            downsample_factor = self.downsample_factor
 
         pred_pts = pc.reshape(-1, 3)  # [N, 3]
 
@@ -642,6 +682,13 @@ class PointCloudViewer:
             conf = conf[0].reshape(-1)
             pred_pts = pred_pts[conf > self.vis_threshold]
             color = color[conf > self.vis_threshold]
+        
+        # Apply downsampling
+        if downsample_factor > 1 and len(pred_pts) > 0:
+            indices = np.arange(0, len(pred_pts), downsample_factor)
+            pred_pts = pred_pts[indices]
+            color = color[indices]
+        
         return pred_pts, color
 
     def add_pc(self, step):
@@ -651,18 +698,37 @@ class PointCloudViewer:
         edge_color = self.pcs[step].get("edge_color", None)
 
         pred_pts, color = self.parse_pc_data(
-            pc, color, conf, edge_color, set_border_color=True
+            pc, color, conf, edge_color, set_border_color=True, downsample_factor=self.downsample_factor
         )
 
         self.vis_pts_list.append(pred_pts)
+        self.pc_orig_colors.append((pred_pts, color.copy()))
+        a = self.opacity_slider.value
+        display_color = np.clip(color * a + (1.0 - a), 0, 1)
         self.pc_handles.append(
             self.server.add_point_cloud(
                 name=f"/frames/{step}/pred_pts",
                 points=pred_pts,
-                colors=color,
+                colors=display_color,
                 point_size=0.005,
             )
         )
+
+    def _get_cam_color(self, step):
+        """Get camera frustum color based on cam_color_mode."""
+        if self.cam_color_mode == "split":
+            if step < self.cam_color_split_frame:
+                return (66, 133, 244)   # blue
+            else:
+                return (255, 152, 0)    # orange
+        elif self.cam_color_mode == "rainbow":
+            n = max(self.num_frames - 1, 1)
+            hue = step / n
+            rgb = mcolors.hsv_to_rgb((hue, 1.0, 1.0))
+            return (int(rgb[0] * 255), int(rgb[1] * 255), int(rgb[2] * 255))
+        else:
+            # Default: keyframe-based
+            return (255, 165, 0) if step in self.keyframe_indices else (50, 205, 50)
 
     def add_camera(self, step):
         cam = self.cam_dict
@@ -675,6 +741,7 @@ class PointCloudViewer:
         fov = 2 * np.arctan(pp[0] / focal)
         aspect = pp[0] / pp[1]
         self.traj_list.append((q, t))
+        cam_color = self._get_cam_color(step)
         self.cam_handles.append(
             self.server.add_camera_frustum(
                 name=f"/frames/{step}/camera",
@@ -683,7 +750,32 @@ class PointCloudViewer:
                 wxyz=q,
                 position=t,
                 scale=0.1,
-                color=(50, 205, 50),
+                color=cam_color,
+            )
+        )
+
+    def add_gt_camera(self, step):
+        """Add GT camera frustum (red, dashed-style) for comparison."""
+        if self.gt_cam_dict is None or step >= len(self.gt_cam_dict["R"]):
+            return
+        cam = self.gt_cam_dict
+        focal = cam["focal"][step]
+        pp = cam["pp"][step]
+        R = cam["R"][step]
+        t = cam["t"][step]
+
+        q = tf.SO3.from_matrix(R).wxyz
+        fov = 2 * np.arctan(pp[0] / focal)
+        aspect = pp[0] / pp[1]
+        self.cam_handles.append(
+            self.server.add_camera_frustum(
+                name=f"/frames/{step}/gt_camera",
+                fov=fov,
+                aspect=aspect,
+                wxyz=q,
+                position=t,
+                scale=0.08,
+                color=(220, 20, 60),  # crimson red
             )
         )
 
@@ -735,7 +827,7 @@ class PointCloudViewer:
                 self.frame_nodes[current_timestep].visible = True
                 self.frame_nodes[prev_timestep].visible = False
             prev_timestep = current_timestep
-            self.server.flush()  # Optional!
+            self.server.flush()
 
         self.server.add_frame(
             "/frames",
@@ -753,6 +845,7 @@ class PointCloudViewer:
             self.add_pc(step)
             if self.show_camera:
                 self.add_camera(step)
+                self.add_gt_camera(step)
 
         prev_timestep = gui_timestep.value
         while True:

@@ -1,3 +1,11 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# NVIDIA CORPORATION and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA CORPORATION is strictly prohibited.
+
 from typing import Optional
 
 import torch
@@ -41,6 +49,106 @@ class PoseDecoder(nn.Module):
 
         pred_cameras = self.mlp(pose_feat)  # Bx7, 3 for absT, 4 for quaR
         return pred_cameras
+
+
+class RelativePoseDecoder(nn.Module):
+    """
+    RelativePoseDecoder with per-token independent decoding.
+
+    Single MLP: 768 -> 3072 -> 9  (3D trans + 6D rot)
+    Output: (B, N, 4, 4) SE(3) matrices + (B, N) valid mask
+    """
+    def __init__(
+        self,
+        hidden_size=768,
+        mlp_ratio=4,
+        pose_encoding_type="absT_rot6d",
+        num_prompt_tokens=16,
+    ):
+        super().__init__()
+
+        self.pose_encoding_type = pose_encoding_type
+        self.hidden_size = hidden_size
+        self.num_prompt_tokens = num_prompt_tokens
+
+        self.mlp = Mlp(
+            in_features=hidden_size,
+            hidden_features=int(hidden_size * mlp_ratio),
+            out_features=9,  # 3 for trans, 6 for rot (6D representation)
+            drop=0,
+        )
+
+    def orthogonalize_rotation(self, R):
+        """
+        Orthogonalize rotation matrix using Gram-Schmidt (6D representation).
+        Uses the first two rows to construct a valid rotation matrix.
+
+        Args:
+            R: (B, 2, 3) - first two rows of rotation matrix
+
+        Returns:
+            R_ortho: (B, 3, 3) orthogonalized rotation matrices
+        """
+        # R is (B, 2, 3) - first two rows
+        x = R[:, 0]  # First row (B, 3)
+        y = R[:, 1]  # Second row (B, 3)
+
+        # Normalize x to get first basis vector
+        x_n = F.normalize(x, dim=-1)
+
+        # Compute z = cross(x_n, y) to get third basis vector direction
+        z = torch.cross(x_n, y, dim=-1)
+        z_n = F.normalize(z, dim=-1)
+
+        # Recompute y to ensure orthogonality: y_n = cross(z_n, x_n)
+        y_n = torch.cross(z_n, x_n, dim=-1)
+
+        # Stack as ROWS: [x_n, y_n, z_n] -> (B, 3, 3)
+        R_ortho = torch.stack([x_n, y_n, z_n], dim=1)
+
+        return R_ortho
+
+    def forward(self, pose_feat, n_valid_tokens=None):
+        """
+        Forward pass: per-token independent decoding of relative poses.
+
+        Args:
+            pose_feat: (B, N, D) - N prompt tokens, each independently decoded
+            n_valid_tokens: int or None - number of valid tokens
+
+        Returns:
+            T_rel: (B, N, 4, 4) per-token SE(3) transforms
+            valid_mask: (B, N) boolean mask indicating valid predictions
+            conf: (B, N) confidence scores (None if use_conf=False)
+        """
+        if pose_feat.dim() == 2:
+            pose_feat = pose_feat.unsqueeze(1)  # (B, 1, D)
+
+        B, N, D = pose_feat.shape
+        flat_feat = pose_feat.reshape(B * N, D).float()
+
+        pred = self.mlp(flat_feat).reshape(B, N, 9)
+        rel_trans = pred[:, :, :3]
+        rel_rot_6d = pred[:, :, 3:9]
+
+        rel_rot_matrix = self.orthogonalize_rotation(
+            rel_rot_6d.reshape(B * N, 2, 3)
+        ).reshape(B, N, 3, 3)
+
+        device = rel_trans.device
+        dtype = rel_trans.dtype
+        T_rel = torch.zeros((B, N, 4, 4), device=device, dtype=dtype)
+        T_rel[:, :, :3, :3] = rel_rot_matrix
+        T_rel[:, :, :3, 3] = rel_trans
+        T_rel[:, :, 3, 3] = 1.0
+
+        valid_mask = torch.zeros(B, N, dtype=torch.bool, device=device)
+        if n_valid_tokens is not None:
+            valid_mask[:, :n_valid_tokens] = True
+        else:
+            valid_mask[:] = True
+
+        return T_rel, valid_mask
 
 
 class PoseEncoder(nn.Module):
@@ -460,3 +568,5 @@ def relative_pose_absT_quatR(t1, q1, t2, q2):
     delta_t = t2 - t1
     t_rel = rotate_vector(q1_inv, delta_t)
     return t_rel, q_rel
+
+

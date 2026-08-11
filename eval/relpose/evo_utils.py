@@ -1,11 +1,28 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# NVIDIA CORPORATION and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA CORPORATION is strictly prohibited.
+
 import os
+import glob
 import re
 from copy import deepcopy
 from pathlib import Path
 
+# Set matplotlib backend before importing evo (which imports matplotlib internally)
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
+# Monkey-patch evo settings before importing evo.tools.plot
+from evo.tools import settings
+settings.SETTINGS.plot_backend = 'Agg'
+
 import evo.main_ape as main_ape
 import evo.main_rpe as main_rpe
-import matplotlib.pyplot as plt
 import numpy as np
 from evo.core import sync
 from evo.core.metrics import PoseRelation, Unit
@@ -41,6 +58,15 @@ def sintel_cam_read(filename):
 def load_replica_traj(gt_file):
     traj_w_c = np.loadtxt(gt_file)
     assert traj_w_c.shape[1] == 12 or traj_w_c.shape[1] == 16
+
+    # Filter out rows with -inf (missing GT poses, e.g. ScanNet tracking failures)
+    valid_mask = ~np.any(np.isinf(traj_w_c), axis=1)
+    if not valid_mask.all():
+        n_invalid = (~valid_mask).sum()
+        print(f"load_replica_traj: skipping {n_invalid}/{len(valid_mask)} frames with inf poses in {gt_file}")
+    valid_indices = np.where(valid_mask)[0]
+    traj_w_c = traj_w_c[valid_mask]
+
     poses = [
         np.array(
             [
@@ -54,7 +80,7 @@ def load_replica_traj(gt_file):
     ]
 
     pose_path = PosePath3D(poses_se3=poses)
-    timestamps_mat = np.arange(traj_w_c.shape[0]).astype(float)
+    timestamps_mat = valid_indices.astype(float)
 
     traj = PoseTrajectory3D(poses_se3=pose_path.poses_se3, timestamps=timestamps_mat)
     xyz = traj.positions_xyz
@@ -99,6 +125,46 @@ def load_sintel_traj(gt_file):  # './data/sintel/training/camdata_left/alley_2'
     return tum_gt_poses, tt
 
 
+def load_kitti_odom_traj(gt_file):
+    """Load KITTI odometry GT trajectory from poses/XX.txt.
+    Each line has 12 floats representing a 3x4 row-major c2w matrix.
+    """
+    traj_w_c = np.loadtxt(gt_file)
+    assert traj_w_c.shape[1] == 12, f"Expected 12 columns, got {traj_w_c.shape[1]}"
+    tum_gt_poses = []
+    tstamps = []
+    for i, r in enumerate(traj_w_c):
+        pose = np.eye(4)
+        pose[:3, :] = r.reshape(3, 4)
+        xyz = pose[:3, 3]
+        R = Rotation.from_matrix(pose[:3, :3])
+        xyzw = R.as_quat()  # scipy scalar-last (x,y,z,w)
+        wxyz = np.array([xyzw[3], xyzw[0], xyzw[1], xyzw[2]])
+        tum_gt_poses.append(np.concatenate([xyz, wxyz]))
+        tstamps.append(float(i))
+    tum_gt_poses = np.stack(tum_gt_poses, 0)
+    return tum_gt_poses, np.expand_dims(np.array(tstamps), -1)
+
+
+def load_vkitti_traj(gt_dir):
+    """Load vkitti2 GT trajectory from per-frame .npz files in a directory.
+    Each .npz has 'camera_pose' (4x4 c2w matrix).
+    """
+    npz_files = sorted(glob.glob(os.path.join(gt_dir, "*_cam.npz")))
+    tum_gt_poses = []
+    tstamps = []
+    for i, f in enumerate(npz_files):
+        c2w = np.load(f)["camera_pose"]  # (4,4) c2w
+        R = Rotation.from_matrix(c2w[:3, :3])
+        xyzw = R.as_quat()  # scipy scalar-last (x,y,z,w)
+        wxyz = np.array([xyzw[3], xyzw[0], xyzw[1], xyzw[2]])
+        tum_gt_poses.append(np.concatenate([c2w[:3, 3], wxyz]))
+        tstamps.append(float(i))
+    tum_gt_poses = np.stack(tum_gt_poses, 0)
+    tum_gt_poses[:, :3] -= np.mean(tum_gt_poses[:, :3], 0, keepdims=True)
+    return tum_gt_poses, np.expand_dims(np.array(tstamps), -1)
+
+
 def load_traj(gt_traj_file, traj_format="sintel", skip=0, stride=1, num_frames=None):
     """Read trajectory format. Return in TUM-RGBD format.
     Returns:
@@ -109,6 +175,10 @@ def load_traj(gt_traj_file, traj_format="sintel", skip=0, stride=1, num_frames=N
         traj_tum, timestamps_mat = load_replica_traj(gt_traj_file)
     elif traj_format == "sintel":
         traj_tum, timestamps_mat = load_sintel_traj(gt_traj_file)
+    elif traj_format == "kitti_odom":
+        traj_tum, timestamps_mat = load_kitti_odom_traj(gt_traj_file)
+    elif traj_format == "vkitti":
+        traj_tum, timestamps_mat = load_vkitti_traj(gt_traj_file)
     elif traj_format in ["tum", "tartanair"]:
         traj = file_interface.read_tum_trajectory_file(gt_traj_file)
         xyz = traj.positions_xyz

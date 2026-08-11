@@ -1,3 +1,10 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# NVIDIA CORPORATION and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA CORPORATION is strictly prohibited.
 import tqdm
 import torch
 from dust3r.utils.device import to_cpu, collate_with_cat
@@ -125,6 +132,7 @@ def loss_of_one_batch_tbptt(
         shape = [s.detach() for s in shape]
         init_state_feat = init_state_feat.detach()
         init_mem = init_mem.detach()
+        pose_token_buffer = []  # Sliding window buffer across chunks
 
         for chunk_id in range((len(batch) - 1) // chunk_size + 1):
             preds = []
@@ -132,13 +140,14 @@ def loss_of_one_batch_tbptt(
             state_feat = state_feat.detach()
             state_pos = state_pos.detach()
             mem = mem.detach()
+            pose_token_buffer = [(idx, t.detach()) for idx, t in pose_token_buffer]  # Detach buffer at chunk boundary
             if chunk_id < ((len(batch) - 1) // chunk_size + 1) - 4:
                 with torch.no_grad():
                     for in_chunk_idx in range(chunk_size):
                         i = chunk_id * chunk_size + in_chunk_idx
                         if i >= len(batch):
                             break
-                        res, (state_feat, mem) = accelerator.unwrap_model(
+                        res, (state_feat, mem), pose_token_buffer = accelerator.unwrap_model(
                             model
                         )._forward_decoder_step(
                             batch,
@@ -151,11 +160,20 @@ def loss_of_one_batch_tbptt(
                             state_feat=state_feat,
                             state_pos=state_pos,
                             mem=mem,
+                            pose_token_buffer=pose_token_buffer,
                         )
                         preds.append(res)
-                        all_preds.append({k: v.detach() for k, v in res.items()})
+                        all_preds.append({k: v.detach() if hasattr(v, 'detach') else v for k, v in res.items()})
                         chunk.append(batch[i])
-                with torch.cuda.amp.autocast(enabled=False):
+                # Remap ref_frame_indices from global to local chunk indices
+                chunk_start = chunk_id * chunk_size
+                for pred in preds:
+                    if "ref_frame_indices" in pred and pred["ref_frame_indices"] is not None:
+                        pred["ref_frame_indices"] = [
+                            ref_idx - chunk_start if chunk_start <= ref_idx < chunk_start + len(preds) else -1
+                            for ref_idx in pred["ref_frame_indices"]
+                        ]
+                with torch.amp.autocast('cuda', enabled=False):
                     loss, loss_details = (
                         criterion(chunk, preds, camera1=batch[0]["camera_pose"])
                         if criterion is not None
@@ -171,7 +189,7 @@ def loss_of_one_batch_tbptt(
                     i = chunk_id * chunk_size + in_chunk_idx
                     if i >= len(batch):
                         break
-                    res, (state_feat, mem) = accelerator.unwrap_model(
+                    res, (state_feat, mem), pose_token_buffer = accelerator.unwrap_model(
                         model
                     )._forward_decoder_step(
                         batch,
@@ -184,11 +202,20 @@ def loss_of_one_batch_tbptt(
                         state_feat=state_feat,
                         state_pos=state_pos,
                         mem=mem,
+                        pose_token_buffer=pose_token_buffer,
                     )
                     preds.append(res)
-                    all_preds.append({k: v.detach() for k, v in res.items()})
+                    all_preds.append({k: v.detach() if hasattr(v, 'detach') else v for k, v in res.items()})
                     chunk.append(batch[i])
-                with torch.cuda.amp.autocast(enabled=False):
+                # Remap ref_frame_indices from global to local chunk indices
+                chunk_start = chunk_id * chunk_size
+                for pred in preds:
+                    if "ref_frame_indices" in pred and pred["ref_frame_indices"] is not None:
+                        pred["ref_frame_indices"] = [
+                            ref_idx - chunk_start if chunk_start <= ref_idx < chunk_start + len(preds) else -1
+                            for ref_idx in pred["ref_frame_indices"]
+                        ]
+                with torch.amp.autocast('cuda', enabled=False):
                     loss, loss_details = (
                         criterion(chunk, preds, camera1=batch[0]["camera_pose"])
                         if criterion is not None
@@ -251,9 +278,9 @@ def inference_step(view, state_args, model, device, verbose=True):
         else:
             view[name] = view[name].to(device, non_blocking=True)
 
-    with torch.cuda.amp.autocast(enabled=False):
+    with torch.amp.autocast('cuda', enabled=False):
         state_feat, state_pos, init_state_feat, mem, init_mem = state_args
-        pred, _ = model.inference_step(
+        pred, _, _ = model.inference_step(
             view, state_feat, state_pos, init_state_feat, mem, init_mem
         )
 
@@ -263,26 +290,36 @@ def inference_step(view, state_args, model, device, verbose=True):
 
 
 @torch.no_grad()
-def inference_recurrent(groups, model, device, verbose=True):
+def inference_recurrent(groups, model, device, verbose=True, ref_frame_indices_fn=None,
+                        keyframe_indices=None, on_frame_processed=None,
+                        buffer_pruning_fn=None):
     ignore_keys = set(
         ["depthmap", "dataset", "label", "instance", "idx", "true_shape", "rng"]
     )
-    for view in groups:
-        for name in view.keys():  # pseudo_focal
-            if name in ignore_keys:
-                continue
-            if isinstance(view[name], tuple) or isinstance(view[name], list):
-                view[name] = [x.to(device, non_blocking=True) for x in view[name]]
-            else:
-                view[name] = view[name].to(device, non_blocking=True)
-
     if verbose:
-        print(f">> Inference with model on {len(groups)} image/raymaps")
-
-    with torch.cuda.amp.autocast(enabled=False):
+        print(f">> Inference with model on {len(groups)} image/raymaps (one at a time)")
+    # Keep views on CPU initially
+    cpu_views = []
+    for view in groups:
+        cpu_view = {}
+        for name, value in view.items():
+            if name in ignore_keys:
+                cpu_view[name] = value
+            else:
+                # Keep on CPU for now
+                cpu_view[name] = value
+        cpu_views.append(cpu_view)
+    with torch.amp.autocast('cuda', enabled=False):
         preds, batch, state_args = model.forward_recurrent(
-            groups, device, ret_state=True
+            cpu_views, device, ret_state=True,
+            ref_frame_indices_fn=ref_frame_indices_fn,
+            keyframe_indices=keyframe_indices,
+            on_frame_processed=on_frame_processed,
+            buffer_pruning_fn=buffer_pruning_fn,
         )
+        # Write final PGO #1 poses to predictions (not intermediate snapshots)
+        if on_frame_processed is not None and hasattr(on_frame_processed, 'finalize'):
+            on_frame_processed.finalize(preds)
         res = dict(views=batch, pred=preds)
     result = to_cpu(res)
     return result, state_args
