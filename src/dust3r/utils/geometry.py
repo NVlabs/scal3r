@@ -1,3 +1,11 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# NVIDIA CORPORATION and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA CORPORATION is strictly prohibited.
+
 # Copyright (C) 2024-present Naver Corporation. All rights reserved.
 # Licensed under CC BY-NC-SA 4.0 (non-commercial use only).
 #
@@ -553,3 +561,23 @@ def weighted_procrustes(A, B, w, use_weights=True, eps=1e-16, return_T=False):
         T[:, :3, 3] = t.squeeze()
         return T
     return R, t.squeeze()
+
+
+def matrix_cumprod(matrices):
+    """Compute cumulative matrix product along the first dimension.
+
+    Args:
+        matrices: Tensor of shape (N, M, M) containing N matrices.
+
+    Returns:
+        Tensor of shape (N, M, M) where result[i] = matrices[0] @ matrices[1] @ ... @ matrices[i]
+    """
+    if len(matrices) == 0:
+        return matrices
+
+    result = torch.empty_like(matrices)
+    result[0] = matrices[0]
+
+    for i in range(1, len(matrices)):
+        torch.matmul(result[i-1], matrices[i], out=result[i])
+    return result

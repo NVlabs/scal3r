@@ -1,3 +1,11 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# NVIDIA CORPORATION and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA CORPORATION is strictly prohibited.
+
 # Copyright (C) 2024-present Naver Corporation. All rights reserved.
 # Licensed under CC BY-NC-SA 4.0 (non-commercial use only).
 #
@@ -18,7 +26,7 @@ from dust3r.heads.postprocess import (
 )
 import dust3r.utils.path_to_croco  # noqa: F401
 from models.dpt_block import DPTOutputAdapter  # noqa
-from dust3r.utils.camera import pose_encoding_to_camera, PoseDecoder
+from dust3r.utils.camera import pose_encoding_to_camera, PoseDecoder, RelativePoseDecoder
 from dust3r.blocks import ConditionModulationBlock
 from torch.utils.checkpoint import checkpoint
 
@@ -214,7 +222,7 @@ class DPTPts3dPose(nn.Module):
         if self.has_pose:
             pose_token = x[-1][:, 0].clone()
             token = x[-1][:, 1:]
-            with torch.cuda.amp.autocast(enabled=False):
+            with torch.amp.autocast('cuda', enabled=False):
                 pose = self.pose_head(pose_token)
 
             token_cross = token.clone()
@@ -223,7 +231,7 @@ class DPTPts3dPose(nn.Module):
             x = x[:-1] + [token]
             x_cross = x[:-1] + [token_cross]
 
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast('cuda', enabled=False):
             self_out = checkpoint(
                 self.dpt_self,
                 x,
@@ -248,6 +256,155 @@ class DPTPts3dPose(nn.Module):
             if self.has_pose:
                 pose = postprocess_pose(pose, self.pose_mode)
                 final_output["camera_pose"] = pose  # B,7
+                cross_out = checkpoint(
+                    self.dpt_cross,
+                    x_cross,
+                    image_size=(img_info[0], img_info[1]),
+                    use_reentrant=False,
+                )
+                tmp = postprocess(cross_out, self.depth_mode, self.conf_mode)
+                final_output["pts3d_in_other_view"] = tmp.pop("pts3d")
+                final_output["conf"] = tmp.pop("conf")
+        return final_output
+
+
+class DPTPts3dPoseWithRelativePose(nn.Module):
+    def __init__(self, net, has_conf=False, has_rgb=False, has_pose=False):
+        super(DPTPts3dPoseWithRelativePose, self).__init__()
+        self.return_all_layers = True  # backbone needs to return all layers
+        self.depth_mode = net.depth_mode
+        self.conf_mode = net.conf_mode
+        self.pose_mode = net.pose_mode
+
+        self.has_conf = has_conf
+        self.has_rgb = has_rgb
+        self.has_pose = has_pose
+
+        pts_channels = 3 + has_conf
+        rgb_channels = has_rgb * 3
+        feature_dim = 256
+        last_dim = feature_dim // 2
+        ed = net.enc_embed_dim
+        dd = net.dec_embed_dim
+        hooks_idx = [0, 1, 2, 3]
+        dim_tokens = [ed, dd, dd, dd]
+        head_type = "regression"
+        output_width_ratio = 1
+
+        pts_dpt_args = dict(
+            output_width_ratio=output_width_ratio,
+            num_channels=pts_channels,
+            feature_dim=feature_dim,
+            last_dim=last_dim,
+            dim_tokens=dim_tokens,
+            hooks_idx=hooks_idx,
+            head_type=head_type,
+        )
+        rgb_dpt_args = dict(
+            output_width_ratio=output_width_ratio,
+            num_channels=rgb_channels,
+            feature_dim=feature_dim,
+            last_dim=last_dim,
+            dim_tokens=dim_tokens,
+            hooks_idx=hooks_idx,
+            head_type=head_type,
+        )
+        if hooks_idx is not None:
+            pts_dpt_args.update(hooks=hooks_idx)
+            rgb_dpt_args.update(hooks=hooks_idx)
+
+        self.dpt_self = DPTOutputAdapter_fix(**pts_dpt_args)
+        dpt_init_args = {} if dim_tokens is None else {"dim_tokens_enc": dim_tokens}
+        self.dpt_self.init(**dpt_init_args)
+
+        self.final_transform = nn.ModuleList(
+            [
+                ConditionModulationBlock(
+                    net.dec_embed_dim,
+                    net.dec_num_heads,
+                    mlp_ratio=4.0,
+                    qkv_bias=True,
+                    rope=net.rope,
+                )
+                for _ in range(2)
+            ]
+        )
+
+        self.dpt_cross = DPTOutputAdapter_fix(**pts_dpt_args)
+        dpt_init_args = {} if dim_tokens is None else {"dim_tokens_enc": dim_tokens}
+        self.dpt_cross.init(**dpt_init_args)
+
+        if has_rgb:
+            self.dpt_rgb = DPTOutputAdapter_fix(**rgb_dpt_args)
+            dpt_init_args = {} if dim_tokens is None else {"dim_tokens_enc": dim_tokens}
+            self.dpt_rgb.init(**dpt_init_args)
+
+        if has_pose:
+            in_dim = net.dec_embed_dim
+            self.pose_head = PoseDecoder(hidden_size=in_dim)
+            self.relative_pose_head = RelativePoseDecoder(
+                hidden_size=in_dim,
+                num_prompt_tokens=getattr(net.config, 'num_prompt_tokens', 4),
+            )
+
+    def forward(self, x, img_info, **kwargs):
+        if self.has_pose:
+            pose_token = x[-1][:, 0].clone()
+            token = x[-1][:, 1:]
+            with torch.amp.autocast('cuda', enabled=False):
+                pose = self.pose_head(pose_token)
+                rel_pose_token = kwargs.get("rel_pose_token")
+                n_valid_tokens = kwargs.get("n_valid_tokens")
+                if rel_pose_token is not None:
+                    relative_poses, valid_mask = self.relative_pose_head(
+                        rel_pose_token,
+                        n_valid_tokens=n_valid_tokens,
+                    )
+                else:
+                    relative_poses = None
+                    valid_mask = None
+            token_cross = token.clone()
+            for blk in self.final_transform:
+                token_cross = blk(token_cross, pose_token, kwargs.get("pos"))
+            x = x[:-1] + [token]
+            x_cross = x[:-1] + [token_cross]
+
+        with torch.amp.autocast('cuda', enabled=False):
+            self_out = checkpoint(
+                self.dpt_self,
+                x,
+                image_size=(img_info[0], img_info[1]),
+                use_reentrant=False,
+            )
+
+            final_output = postprocess(self_out, self.depth_mode, self.conf_mode)
+            final_output["pts3d_in_self_view"] = final_output.pop("pts3d")
+            final_output["conf_self"] = final_output.pop("conf")
+
+            if self.has_rgb:
+                rgb_out = checkpoint(
+                    self.dpt_rgb,
+                    x,
+                    image_size=(img_info[0], img_info[1]),
+                    use_reentrant=False,
+                )
+                rgb_output = postprocess_rgb(rgb_out)
+                final_output.update(rgb_output)
+
+            if self.has_pose:
+                pose = postprocess_pose(pose, self.pose_mode)
+                final_output["camera_pose"] = pose  # B,7
+                ref_frame_indices = kwargs.get("ref_frame_indices")
+                if relative_poses is not None:
+                    final_output["relative_poses"] = relative_poses       # (B, N, 4, 4)
+                    final_output["relative_poses_valid"] = valid_mask      # (B, N)
+                    final_output["relative_pose"] = relative_poses[:, 0]  # (B, 4, 4) backward compat
+                    final_output["ref_frame_indices"] = ref_frame_indices  # List[int]
+                else:
+                    final_output["relative_poses"] = None
+                    final_output["relative_poses_valid"] = None
+                    final_output["relative_pose"] = None
+                    final_output["ref_frame_indices"] = None
                 cross_out = checkpoint(
                     self.dpt_cross,
                     x_cross,

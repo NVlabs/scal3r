@@ -1,3 +1,11 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# NVIDIA CORPORATION and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA CORPORATION is strictly prohibited.
+
 import os
 import sys
 
@@ -67,6 +75,226 @@ def get_args_parser():
     parser.add_argument("--revisit", type=int, default=1)
     parser.add_argument("--freeze_state", action="store_true", default=False)
     parser.add_argument("--solve_pose", action="store_true", default=False)
+    parser.add_argument(
+        "--use_relative_pose",
+        action="store_true",
+        default=False,
+        help="Use relative pose accumulation + PGO instead of absolute camera_pose. "
+        "If not set, auto-detects based on model output.",
+    )
+    parser.add_argument(
+        "--no_relative_pose",
+        action="store_true",
+        default=False,
+        help="Force absolute camera_pose even if relative_pose is available.",
+    )
+    parser.add_argument(
+        "--skip_pgo",
+        action="store_true",
+        default=False,
+        help="Skip PGO optimization, use chain accumulation only.",
+    )
+    parser.add_argument(
+        "--pgo_sigma_rot",
+        type=float,
+        default=None,
+        help="Override base sigma for rotation in PGO (default: 0.5)",
+    )
+    parser.add_argument(
+        "--pgo_sigma_trans",
+        type=float,
+        default=None,
+        help="Override base sigma for translation in PGO (default: 0.5)",
+    )
+    parser.add_argument(
+        "--pgo_position_scale",
+        type=float,
+        default=0,
+        help="Position-dependent sigma: sigma *= (1 + frame_idx / position_scale). 0=disabled.",
+    )
+    parser.add_argument(
+        "--pgo_max_edges",
+        type=int,
+        default=0,
+        help="Max PGO constraints per frame (0=unlimited, 2=only gap-1 and gap-2).",
+    )
+    parser.add_argument(
+        "--pgo_mode",
+        type=str,
+        default=None,
+        choices=["huber", "dcs", "cauchy", "tukey", "irls"],
+        help="PGO robust kernel mode (default: huber)",
+    )
+    parser.add_argument(
+        "--max_ref_frames",
+        type=int,
+        default=None,
+        help="Cap on reference frames (relative-pose tokens) per frame, applied by the keyframe callback (default: 4)",
+    )
+    parser.add_argument(
+        "--kf_window",
+        type=int,
+        default=4,
+        help="Number of keyframes to keep in buffer (default: 4)",
+    )
+    parser.add_argument(
+        "--nkf_buffer_size",
+        type=int,
+        default=0,
+        help="Number of non-keyframes to keep in buffer (default: 0)",
+    )
+    parser.add_argument(
+        "--keyframe_overlap_thr",
+        type=float,
+        default=None,
+        help="Override keyframe overlap threshold (default: use inference.py default)",
+    )
+    # Phase 3 features
+    parser.add_argument(
+        "--pgo_adaptive_sigma",
+        action="store_true",
+        default=False,
+        help="Adapt PGO sigma based on sequence length (short=tighter, long=looser)",
+    )
+    parser.add_argument(
+        "--pgo_warmstart",
+        action="store_true",
+        default=False,
+        help="Use PGO #1 (iSAM2) result as initial guess for PGO #2",
+    )
+    parser.add_argument(
+        "--kf_edges_only",
+        action="store_true",
+        default=False,
+        help="Only keep PGO edges where at least one endpoint is a keyframe",
+    )
+    parser.add_argument(
+        "--no_correct_scale",
+        action="store_true",
+        default=False,
+        help="Disable scale correction in eval alignment (SE(3) instead of Sim(3))",
+    )
+    parser.add_argument(
+        "--no_finalize",
+        action="store_true",
+        default=False,
+        help="Skip iSAM2 finalize (extra iterations + read all poses) for ablation",
+    )
+    parser.add_argument(
+        "--rot_gap_power",
+        type=float,
+        default=None,
+        help="Gap scaling power for rotation sigma (default: 0.5 = sqrt)",
+    )
+    parser.add_argument(
+        "--trans_gap_power",
+        type=float,
+        default=None,
+        help="Gap scaling power for translation sigma (default: 0.5 = sqrt)",
+    )
+    parser.add_argument(
+        "--use_pgo1_poses",
+        action="store_true",
+        default=False,
+        help="Use PGO #1 (iSAM2 incremental) poses directly, skip chain + PGO #2",
+    )
+    parser.add_argument(
+        "--use_online_pgo",
+        action="store_true",
+        default=False,
+        help="Use online PGO (sliding window) poses instead of global PGO",
+    )
+    parser.add_argument(
+        "--force_kf_gate",
+        action="store_true",
+        default=False,
+        help="Force keyframe-gated state update regardless of sequence length",
+    )
+    parser.add_argument(
+        "--no_kf_gate",
+        action="store_true",
+        default=False,
+        help="Disable keyframe-gated state update (all frames update state)",
+    )
+    parser.add_argument(
+        "--reset_interval",
+        type=int,
+        default=1000000,
+        help="Reset recurrent state every N frames with 1 overlap frame (default: disabled)",
+    )
+    parser.add_argument(
+        "--final_batch_opt",
+        action="store_true",
+        default=False,
+        help="Run final Levenberg-Marquardt batch optimization after incremental iSAM2",
+    )
+    # Loop closure arguments
+    parser.add_argument(
+        "--loop_closure",
+        action="store_true",
+        default=False,
+        help="Enable online loop closure detection during inference",
+    )
+    parser.add_argument(
+        "--loop_similarity_threshold",
+        type=float,
+        default=0.85,
+        help="Cosine similarity threshold for loop detection (higher = fewer but more reliable)",
+    )
+    parser.add_argument(
+        "--loop_temporal_gap",
+        type=int,
+        default=300,
+        help="Minimum frame gap for loop closure candidates",
+    )
+    parser.add_argument(
+        "--loop_max_per_frame",
+        type=int,
+        default=1,
+        help="Maximum number of loop closure frames to inject per keyframe",
+    )
+    parser.add_argument(
+        "--loop_nms_window",
+        type=int,
+        default=50,
+        help="NMS window: suppress loop if query/target both within this many frames of a recent loop",
+    )
+    parser.add_argument(
+        "--loop_max_translation",
+        type=float,
+        default=20.0,
+        help="Geometric verification: reject loop edges with predicted translation > this (meters)",
+    )
+    parser.add_argument(
+        "--loop_gt",
+        action="store_true",
+        default=False,
+        help="Use GT poses for loop detection (ablation only, not for real eval)",
+    )
+    parser.add_argument(
+        "--loop_sigma_scale",
+        type=float,
+        default=1.0,
+        help="Sigma scale for loop closure identity constraint (lower = tighter snap)",
+    )
+    parser.add_argument(
+        "--reset_kf_interval",
+        type=int,
+        default=0,
+        help="Reset buffer every N keyframes (0=disabled, use static reset_interval)",
+    )
+    parser.add_argument(
+        "--kf_ref_only",
+        action="store_true",
+        default=False,
+        help="Only use keyframe indices as references (for noref ablation: accumulate from last KF)",
+    )
+    parser.add_argument(
+        "--num_init_frames",
+        type=int,
+        default=5,
+        help="Number of initial frames treated as keyframes before overlap-based selection (default: 5)",
+    )
     return parser
 
 
@@ -82,7 +310,8 @@ def eval_pose_estimation(args, model, save_dir=None):
 
 
 def eval_pose_estimation_dist(args, model, img_path, save_dir=None, mask_path=None):
-    from dust3r.inference import inference
+    from dust3r.inference import inference, inference_recurrent
+    from dust3r.utils.pgo import make_kf_only_callbacks
 
     metadata = dataset_metadata.get(args.eval_dataset)
     anno_path = metadata.get("anno_path", None)
@@ -107,6 +336,22 @@ def eval_pose_estimation_dist(args, model, img_path, save_dir=None, mask_path=No
     model.to(distributed_state.device)
     device = distributed_state.device
 
+    # Loop closure detector (loaded once, reused across sequences)
+    loop_detector = None
+    if args.loop_closure and not getattr(args, 'loop_gt', False):
+        from dust3r.utils.loop_closure import OnlineLoopDetector
+        loop_detector = OnlineLoopDetector(
+            device=device,
+            similarity_threshold=args.loop_similarity_threshold,
+            temporal_gap=args.loop_temporal_gap,
+            max_loops_per_frame=args.loop_max_per_frame,
+            nms_window=args.loop_nms_window,
+        )
+        print(f"Loop closure enabled: threshold={args.loop_similarity_threshold}, "
+              f"gap={args.loop_temporal_gap}, max_per_frame={args.loop_max_per_frame}")
+    elif args.loop_closure and getattr(args, 'loop_gt', False):
+        print("Loop closure enabled: GT detection mode (ablation)")
+
     with distributed_state.split_between_processes(seq_list) as seqs:
         ate_list = []
         rpe_trans_list = []
@@ -128,11 +373,26 @@ def eval_pose_estimation_dist(args, model, img_path, save_dir=None, mask_path=No
                 )
                 mask_path_seq = mask_path_seq_func(mask_path, seq)
 
+                img_filter = metadata.get("img_filter", None)
                 filelist = [
                     os.path.join(dir_path, name) for name in os.listdir(dir_path)
+                    if img_filter is None or img_filter(name)
                 ]
                 filelist.sort()
                 filelist = filelist[:: args.pose_eval_stride]
+
+                # Filter out frames with -inf GT poses (e.g. missing tracking in ScanNet)
+                gt_valid_mask = None
+                gt_traj_file_early = metadata["gt_traj_func"](img_path, anno_path, seq)
+                if gt_traj_file_early is not None and os.path.isfile(gt_traj_file_early):
+                    with open(gt_traj_file_early, 'r') as f:
+                        gt_lines = f.readlines()
+                    gt_lines = gt_lines[:: args.pose_eval_stride]
+                    gt_valid_mask = ['-inf' not in line for line in gt_lines[:len(filelist)]]
+                    n_invalid = sum(1 for v in gt_valid_mask if not v)
+                    if n_invalid > 0:
+                        print(f"Filtering {n_invalid}/{len(filelist)} frames with -inf GT poses in {seq}")
+                        filelist = [f for f, v in zip(filelist, gt_valid_mask) if v]
 
                 views = prepare_input(
                     filelist,
@@ -141,8 +401,77 @@ def eval_pose_estimation_dist(args, model, img_path, save_dir=None, mask_path=No
                     crop=not args.no_crop,
                     revisit=args.revisit,
                     update=not args.freeze_state,
+                    reset_interval=args.reset_interval,
                 )
-                outputs, _ = inference(views, model, device)
+                # Keyframe selection (works for both CUT3R and Scal3R:
+                # CUT3R uses camera_pose for c2w, Scal3R uses relative_poses)
+                # Reset / create loop detector for new sequence
+                seq_loop_detector = loop_detector  # SALAD detector (shared)
+                if args.loop_closure and getattr(args, 'loop_gt', False):
+                    from dust3r.utils.loop_closure import GTLoopDetector
+                    gt_file = metadata["gt_traj_func"](img_path, anno_path, seq)
+                    if gt_file and os.path.isfile(gt_file):
+                        seq_loop_detector = GTLoopDetector(
+                            gt_poses_file=gt_file,
+                            temporal_gap=args.loop_temporal_gap,
+                            max_loops_per_frame=args.loop_max_per_frame,
+                            nms_window=args.loop_nms_window,
+                            reset_interval=args.reset_interval,
+                        )
+                        print(f"  GT loop detector for {seq}: {gt_file}")
+                if seq_loop_detector is not None:
+                    seq_loop_detector.reset()
+                kf_extra_params = {}
+                if args.keyframe_overlap_thr is not None:
+                    kf_extra_params['keyframe_overlap_thr'] = args.keyframe_overlap_thr
+                if args.no_finalize:
+                    kf_extra_params['do_finalize'] = False
+                ref_frame_indices_fn, on_frame_processed, keyframe_indices, buffer_pruning_fn = make_kf_only_callbacks(
+                    kf_window=args.kf_window,
+                    nkf_buffer_size=args.nkf_buffer_size,
+                    max_ref_frames=(args.max_ref_frames if args.max_ref_frames is not None else 4),
+                    pgo_sigma_rot=args.pgo_sigma_rot,
+                    pgo_sigma_trans=args.pgo_sigma_trans,
+                    pgo_position_scale=args.pgo_position_scale,
+                    pgo_max_edges=args.pgo_max_edges,
+                    final_batch_opt=getattr(args, 'final_batch_opt', False),
+                    loop_detector=seq_loop_detector,
+                    loop_image_paths=_build_view_image_paths(filelist, args.reset_interval),
+                    loop_max_translation=args.loop_max_translation,
+                    loop_sigma_scale=args.loop_sigma_scale,
+                    reset_kf_interval=args.reset_kf_interval,
+                    kf_ref_only=getattr(args, 'kf_ref_only', False),
+                    num_init_frames=args.num_init_frames,
+                    **kf_extra_params,
+                )
+                # State gating: for Scal3R on long sequences (>60 frames),
+                # keyframe-based state update reduces noise from redundant frames.
+                # Short sequences need every frame's state update.
+                # CUT3R always passes None (matches training).
+                if args.no_kf_gate:
+                    kf_for_state = None
+                elif args.force_kf_gate or (args.use_relative_pose and len(views) > 60):
+                    kf_for_state = keyframe_indices
+                else:
+                    kf_for_state = None
+                outputs, _ = inference_recurrent(
+                    views, model, device,
+                    ref_frame_indices_fn=ref_frame_indices_fn,
+                    keyframe_indices=kf_for_state,
+                    on_frame_processed=on_frame_processed,
+                    buffer_pruning_fn=buffer_pruning_fn,
+                )
+
+                # Determine use_relative_pose setting
+                if args.use_relative_pose and args.no_relative_pose:
+                    print("Warning: Both --use_relative_pose and --no_relative_pose specified. --no_relative_pose takes precedence.")
+                    use_rel = False
+                elif args.no_relative_pose:
+                    use_rel = False
+                elif args.use_relative_pose:
+                    use_rel = True
+                else:
+                    use_rel = None  # auto-detect
 
                 (
                     colors,
@@ -153,7 +482,18 @@ def eval_pose_estimation_dist(args, model, img_path, save_dir=None, mask_path=No
                     cam_dict,
                     pr_poses,
                 ) = prepare_output(
-                    outputs, revisit=args.revisit, solve_pose=args.solve_pose
+                    outputs, revisit=args.revisit, solve_pose=args.solve_pose,
+                    use_relative_pose=use_rel, skip_pgo=args.skip_pgo,
+                    pgo_sigma_rot=args.pgo_sigma_rot,
+                    pgo_sigma_trans=args.pgo_sigma_trans,
+                    pgo_mode=args.pgo_mode,
+                    pgo_adaptive_sigma=args.pgo_adaptive_sigma,
+                    pgo_warmstart=args.pgo_warmstart,
+                    kf_edges_only=args.kf_edges_only,
+                    rot_gap_power=args.rot_gap_power,
+                    trans_gap_power=args.trans_gap_power,
+                    use_pgo1_poses=args.use_pgo1_poses,
+                    use_online_pgo=args.use_online_pgo,
                 )
 
                 pred_traj = get_tum_poses(pr_poses)
@@ -285,6 +625,17 @@ if __name__ == "__main__":
         )
         return c2w, focal, pp.reshape(B, 2)
 
+    def _build_view_image_paths(img_paths, reset_interval):
+        """Build view-indexed image path list that accounts for overlap frames.
+        prepare_input inserts an overlap frame after every reset_interval frames.
+        This maps view_idx -> original image path."""
+        result = []
+        for i, path in enumerate(img_paths):
+            result.append(path)
+            if (i + 1) % reset_interval == 0:
+                result.append(path)  # overlap frame uses same image
+        return result
+
     def prepare_input(
         img_paths,
         img_mask,
@@ -294,6 +645,7 @@ if __name__ == "__main__":
         revisit=1,
         update=True,
         crop=True,
+        reset_interval=1000000,
     ):
         images = load_images(img_paths, size=size, crop=crop)
         views = []
@@ -321,9 +673,13 @@ if __name__ == "__main__":
                     "img_mask": torch.tensor(True).unsqueeze(0),
                     "ray_mask": torch.tensor(False).unsqueeze(0),
                     "update": torch.tensor(True).unsqueeze(0),
-                    "reset": torch.tensor(False).unsqueeze(0),
+                    "reset": torch.tensor((i + 1) % reset_interval == 0).unsqueeze(0),
                 }
                 views.append(view)
+                if (i + 1) % reset_interval == 0:
+                    overlap_view = deepcopy(view)
+                    overlap_view["reset"] = torch.tensor(False).unsqueeze(0)
+                    views.append(overlap_view)
         else:
 
             num_views = len(images) + len(raymaps)
@@ -381,11 +737,32 @@ if __name__ == "__main__":
             return new_views
         return views
 
-    def prepare_output(outputs, revisit=1, solve_pose=False):
+    def prepare_output(outputs, revisit=1, solve_pose=False, use_relative_pose=None, skip_pgo=False,
+                        pgo_sigma_rot=None, pgo_sigma_trans=None, pgo_mode=None,
+                        pgo_adaptive_sigma=False, pgo_warmstart=False,
+                        kf_edges_only=False, rot_gap_power=None, trans_gap_power=None,
+                        use_pgo1_poses=False, use_online_pgo=False):
+        from dust3r.utils.pgo import accumulate_poses
+
         valid_length = len(outputs["pred"]) // revisit
         outputs["pred"] = outputs["pred"][-valid_length:]
         outputs["views"] = outputs["views"][-valid_length:]
 
+        has_reset_key = len(outputs["views"]) > 0 and "reset" in outputs["views"][0]
+        if has_reset_key:
+            reset_mask = torch.cat([view["reset"] for view in outputs["views"]], 0)
+            # shifted_reset_mask marks overlap frames (frame after reset=True)
+            shifted_reset_mask = torch.cat(
+                [torch.tensor(False).unsqueeze(0), reset_mask[:-1]], dim=0
+            )
+            if shifted_reset_mask.any():
+                outputs["pred"] = [
+                    pred for pred, mask in zip(outputs["pred"], shifted_reset_mask) if not mask
+                ]
+                outputs["views"] = [
+                    view for view, mask in zip(outputs["views"], shifted_reset_mask) if not mask
+                ]
+        
         if solve_pose:
             pts3ds_self = [
                 output["pts3d_in_self_view"].cpu() for output in outputs["pred"]
@@ -413,10 +790,22 @@ if __name__ == "__main__":
             conf_self = [output["conf_self"].cpu() for output in outputs["pred"]]
             conf_other = [output["conf"].cpu() for output in outputs["pred"]]
             pts3ds_self = torch.cat(pts3ds_self, 0)
-            pr_poses = [
-                pose_encoding_to_camera(pred["camera_pose"].clone()).cpu()
-                for pred in outputs["pred"]
-            ]
+            pr_poses = accumulate_poses(
+                outputs["pred"],
+                views=outputs["views"],
+                use_relative_pose=use_relative_pose,
+                skip_pgo=skip_pgo,
+                pgo_sigma_rot=pgo_sigma_rot,
+                pgo_sigma_trans=pgo_sigma_trans,
+                pgo_mode=pgo_mode,
+                pgo_adaptive_sigma=pgo_adaptive_sigma,
+                pgo_warmstart=pgo_warmstart,
+                kf_edges_only=kf_edges_only,
+                rot_gap_power=rot_gap_power,
+                trans_gap_power=trans_gap_power,
+                use_pgo1_poses=use_pgo1_poses,
+                use_online_pgo=use_online_pgo,
+            )
             pr_poses = torch.cat(pr_poses, 0)
 
             B, H, W, _ = pts3ds_self.shape

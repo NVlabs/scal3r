@@ -1,6 +1,15 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# NVIDIA CORPORATION and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA CORPORATION is strictly prohibited.
+
 from copy import copy, deepcopy
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from dust3r.inference import get_pred_pts3d, find_opt_scaling
 from dust3r.utils.geometry import (
@@ -21,7 +30,20 @@ from dust3r.utils.camera import (
     pose_encoding_to_camera,
     camera_to_pose_encoding,
     relative_pose_absT_quatR,
+    quaternion_to_matrix,
 )
+from dust3r.utils.alignment import (
+    align_points_scale,
+)
+
+
+def weighted_mean(x: torch.Tensor, w: torch.Tensor = None, dim=None, keepdim: bool = False, eps: float = 1e-7) -> torch.Tensor:
+    """Compute weighted mean (from Pi3/MoGe)"""
+    if w is None:
+        return x.mean(dim=dim, keepdim=keepdim)
+    else:
+        w = w.to(x.dtype)
+        return (x * w).mean(dim=dim, keepdim=keepdim) / w.mean(dim=dim, keepdim=keepdim).add(eps)
 
 
 def Sum(*losses_and_masks):
@@ -302,6 +324,12 @@ class Regr3DPose(Criterion, MultiLoss):
         gt_scale=False,
         sky_loss_value=2,
         max_metric_scale=False,
+        use_pts_loss=True,
+        use_pose_loss=False,
+        use_rel_pose_loss=True,
+        rel_rot_loss_weight=1.0,
+        rel_trans_loss_weight=1.0,
+        use_align_scale=False,
     ):
         super().__init__(criterion)
         if norm_mode.startswith("?"):
@@ -315,6 +343,18 @@ class Regr3DPose(Criterion, MultiLoss):
 
         self.sky_loss_value = sky_loss_value
         self.max_metric_scale = max_metric_scale
+
+        # Loss switches to control which losses to compute
+        self.use_pts_loss = use_pts_loss
+        self.use_pose_loss = use_pose_loss
+        self.use_rel_pose_loss = use_rel_pose_loss
+
+        # Loss weights to balance translation vs rotation
+        self.rel_rot_loss_weight = rel_rot_loss_weight
+        self.rel_trans_loss_weight = rel_trans_loss_weight
+
+        # Scale alignment switch
+        self.use_align_scale = use_align_scale
 
     def get_norm_factor_point_cloud(
         self, pts_self, pts_cross, valids, conf_self, conf_cross, norm_self_only=False
@@ -331,6 +371,37 @@ class Regr3DPose(Criterion, MultiLoss):
                 pts, self.norm_mode, valids, confs, ret_factor_only=True
             )
         return norm_factor
+
+    def prepare_ROE(self, pts, mask, target_size=4096):
+        """Downsample point cloud using ROE (Robust Optimization Ensemble) method.
+
+        NOTE: It is important to use nearest interpolate. Linear interpolate will lead to unstable result!
+
+        Args:
+            pts: Point cloud tensor, shape (B, N, H, W, C)
+            mask: Valid mask, shape (B, N, H, W)
+            target_size: Target number of points after downsampling
+
+        Returns:
+            Downsampled points, shape (B, target_size, C)
+        """
+        B, N, H, W, C = pts.shape
+        output = []
+
+        for i in range(B):
+            valid_pts = pts[i][mask[i]]  # Select all valid points across all views
+
+            if valid_pts.shape[0] > 0:
+                valid_pts = valid_pts.permute(1, 0).unsqueeze(0)  # (1, C, N_valid)
+                # NOTE: It is important to use nearest interpolate. Linear interpolate will lead to unstable result!
+                valid_pts = F.interpolate(valid_pts, size=target_size, mode='nearest')  # (1, C, target_size)
+                valid_pts = valid_pts.squeeze(0).permute(1, 0)  # (target_size, C)
+            else:
+                valid_pts = torch.ones((target_size, C), device=pts.device)
+
+            output.append(valid_pts)
+
+        return torch.stack(output, dim=0)  # (B, target_size, C)
 
     def get_norm_factor_poses(self, gt_trans, pr_trans, not_metric_mask):
 
@@ -373,6 +444,113 @@ class Regr3DPose(Criterion, MultiLoss):
             )
             norm_factor_pr[not_metric_mask] = norm_factor_pr_not_metric
         return norm_factor_gt, norm_factor_pr
+
+    def _compute_relative_poses_window(self, gt_poses, preds, pose_norm_factor_pr, S_flat, eps=1e-3):
+        """Compute GT and aligned predicted relative poses for sliding window.
+
+        Uses explicit ref_frame_indices from predictions when available,
+        falls back to implicit sliding window (ref = i - k - 1) otherwise.
+
+        Args:
+            gt_poses: List of (trans, quat) tuples for each view
+            preds: List of prediction dictionaries
+            pose_norm_factor_pr: Normalization factor for predicted poses (B, 1)
+            S_flat: Scale alignment factor (B,)
+            eps: Small value for numerical stability
+
+        Returns:
+            gt_relative_poses: dict with 'trans' (N, K, B, 3), 'rot' (N, K, B, 3, 3), 'valid' (N, K)
+            pr_relative_poses: dict with 'trans' (N, K, B, 3), 'rot' (N, K, B, 3, 3)
+            or (None, None) if no valid predictions
+        """
+        N_frames = len(preds)
+        if N_frames < 2:
+            return None, None
+
+        # Find max K across all frames (dynamic token count means K varies per frame)
+        K = None
+        for i in range(1, N_frames):
+            if "relative_poses" in preds[i] and preds[i]["relative_poses"] is not None:
+                K_i = preds[i]["relative_poses"].shape[1]
+                if K is None:
+                    K = K_i
+                else:
+                    K = max(K, K_i)
+        if K is None:
+            return None, None
+
+        gt_trans_all = torch.stack([pose[0] for pose in gt_poses], dim=0)  # (N, B, 3)
+        gt_quats_all = torch.stack([pose[1] for pose in gt_poses], dim=0)  # (N, B, 4)
+        B = gt_trans_all.shape[1]
+        device = gt_trans_all.device
+        gt_R_all = quaternion_to_matrix(gt_quats_all.view(-1, 4)).view(N_frames, B, 3, 3)
+
+        # Build (i, k, ref) triples using explicit ref_frame_indices when available
+        i_list, k_list, ref_list = [], [], []
+        for i in range(1, N_frames):
+            if "relative_poses" not in preds[i] or preds[i]["relative_poses"] is None:
+                continue
+            ref_indices = preds[i].get("ref_frame_indices")
+            K_i = preds[i]["relative_poses"].shape[1]
+            for k in range(K_i):
+                if ref_indices is not None and k < len(ref_indices):
+                    ref_idx = ref_indices[k]
+                else:
+                    # Fallback: implicit sliding window
+                    ref_idx = i - k - 1
+                if 0 <= ref_idx < N_frames:
+                    i_list.append(i)
+                    k_list.append(k)
+                    ref_list.append(ref_idx)
+
+        if len(i_list) == 0:
+            return None, None
+
+        i_idx = torch.tensor(i_list, device=device, dtype=torch.long)
+        k_idx = torch.tensor(k_list, device=device, dtype=torch.long)
+        ref_idx = torch.tensor(ref_list, device=device, dtype=torch.long)
+        M = i_idx.shape[0]
+
+        # Batch compute GT relative poses (2 bmm calls instead of M)
+        R_i = gt_R_all[i_idx]        # (M, B, 3, 3)
+        R_ref = gt_R_all[ref_idx]    # (M, B, 3, 3)
+        t_i = gt_trans_all[i_idx]    # (M, B, 3)
+        t_ref = gt_trans_all[ref_idx]
+
+        R_i_T = R_i.transpose(-2, -1)
+        MB = M * B
+        rel_rot = torch.bmm(R_i_T.reshape(MB, 3, 3), R_ref.reshape(MB, 3, 3)).view(M, B, 3, 3)
+        delta_t = (t_ref - t_i).unsqueeze(-1)
+        rel_trans = torch.bmm(R_i_T.reshape(MB, 3, 3), delta_t.reshape(MB, 3, 1)).view(M, B, 3)
+
+        # Scatter into output tensors (padded to max K)
+        gt_rel_trans = torch.zeros(N_frames, K, B, 3, device=device, dtype=gt_trans_all.dtype)
+        gt_rel_rot = torch.zeros(N_frames, K, B, 3, 3, device=device, dtype=gt_trans_all.dtype)
+        valid_mask = torch.zeros(N_frames, K, dtype=torch.bool, device=device)
+        gt_rel_rot[i_idx, k_idx] = rel_rot
+        gt_rel_trans[i_idx, k_idx] = rel_trans
+        valid_mask[i_idx, k_idx] = True
+
+        # Extract predicted relative poses, pad to max K
+        pr_rel_trans = torch.zeros_like(gt_rel_trans)
+        pr_rel_rot = torch.zeros_like(gt_rel_rot)
+
+        for i in range(1, N_frames):
+            if "relative_poses" not in preds[i] or preds[i]["relative_poses"] is None:
+                continue
+            pred_rel = preds[i]["relative_poses"]  # (B, K_i, 4, 4)
+            K_i = pred_rel.shape[1]
+            pr_rel_trans[i, :K_i] = pred_rel[:, :, :3, 3].permute(1, 0, 2)  # (K_i, B, 3)
+            pr_rel_rot[i, :K_i] = pred_rel[:, :, :3, :3].permute(1, 0, 2, 3)  # (K_i, B, 3, 3)
+
+        # Apply scale alignment to predicted translations
+        scale = S_flat.view(1, 1, -1, 1) / pose_norm_factor_pr.view(1, 1, -1, 1).clip(eps)
+        pr_rel_trans = pr_rel_trans * scale
+
+        return (
+            {'trans': gt_rel_trans, 'rot': gt_rel_rot, 'valid': valid_mask},
+            {'trans': pr_rel_trans, 'rot': pr_rel_rot}
+        )
 
     def get_all_pts3d(
         self,
@@ -492,6 +670,47 @@ class Regr3DPose(Criterion, MultiLoss):
             pose_norm_factor_pr.squeeze() > eps
         )
 
+        # Compute S alignment between normalized pred and GT (Pi3 style)
+        gt_pts_self_stacked = torch.stack(gt_pts_self, dim=1)  # (B, N, H, W, 3)
+        pr_pts_self_stacked = torch.stack(pr_pts_self, dim=1)  # (B, N, H, W, 3)
+        valid_stacked = torch.stack(valids, dim=1)             # (B, N, H, W)
+
+        B = gt_pts_self_stacked.shape[0]
+        with torch.no_grad():
+            if self.use_align_scale:
+                _, N, H, W, _ = gt_pts_self_stacked.shape
+
+                # 1. Compute depth-based weights (Pi3 style)
+                weights_ = gt_pts_self_stacked[..., 2]  # (B, N, H, W) - Z coordinate (depth)
+                weights_ = weights_.clamp_min(0.1 * weighted_mean(weights_, valid_stacked, dim=(-2, -1), keepdim=True))
+                weights_ = 1 / (weights_ + 1e-6)
+
+                # 2. Prepare ROE (downsample to 4096 points) - Pi3 style
+                xyz_pred_local = self.prepare_ROE(
+                    pr_pts_self_stacked, valid_stacked, target_size=4096
+                ).contiguous()  # (B, 4096, 3)
+                xyz_gt_local = self.prepare_ROE(
+                    gt_pts_self_stacked, valid_stacked, target_size=4096
+                ).contiguous()  # (B, 4096, 3)
+                xyz_weights_local = self.prepare_ROE(
+                    weights_[..., None], valid_stacked, target_size=4096
+                ).contiguous()[:, :, 0]  # (B, 4096)
+
+                # 3. Use robust L1 alignment (Pi3 style)
+                S = align_points_scale(xyz_pred_local, xyz_gt_local, xyz_weights_local)  # (B,)
+
+                # Ensure positive scale
+                S[S <= 0] *= -1
+                S = S.view(-1, 1, 1, 1)  # (B, 1, 1, 1)
+            else:
+                S = torch.ones(B, 1, 1, 1, device=gt_pts_self_stacked.device)
+
+        # Apply S to normalized pred points
+        pr_pts_self = [pts * S for pts in pr_pts_self]
+        pr_pts_cross = [pts * S for pts in pr_pts_cross]
+        pr_poses = [(trans * S.view(-1, 1), quat) for trans, quat in pr_poses]
+        S_flat = S.view(-1)
+
         if any(camera_only):
             # this is equal to a loss for camera intrinsics
             gt_pts_self = [
@@ -510,7 +729,11 @@ class Regr3DPose(Criterion, MultiLoss):
                 )
                 for pr in pr_pts_self
             ]
-            # # do not add cross view loss when there is only camera supervision
+
+        # Compute relative poses (sliding window)
+        gt_relative_poses, pr_relative_poses = self._compute_relative_poses_window(
+            gt_poses, preds, pose_norm_factor_pr, S_flat, eps
+        )
 
         skys = [gt["sky_mask"] & ~valid for gt, valid in zip(gts, valids)]
         return (
@@ -523,7 +746,9 @@ class Regr3DPose(Criterion, MultiLoss):
             valids,
             skys,
             pose_masks,
-            {},
+            gt_relative_poses,
+            pr_relative_poses,
+            {},  # monitoring (empty dict for consistency)
         )
 
     def get_all_pts3d_with_scale_loss(
@@ -681,6 +906,9 @@ class Regr3DPose(Criterion, MultiLoss):
             # # do not add cross view loss when there is only camera supervision
 
         skys = [gt["sky_mask"] & ~valid for gt, valid in zip(gts, valids)]
+        
+        gt_relative_poses = []
+        pr_relative_poses = []
         return (
             gt_pts_self,
             gt_pts_cross,
@@ -691,6 +919,8 @@ class Regr3DPose(Criterion, MultiLoss):
             valids,
             skys,
             pose_masks,
+            gt_relative_poses,
+            pr_relative_poses,
             {"scale_loss": pose_scale_loss + pts_scale_loss},
         )
 
@@ -758,6 +988,70 @@ class Regr3DPose(Criterion, MultiLoss):
             )
 
         return pose_loss
+    
+    def rot_ang_loss(self, R, Rgt, eps=1e-6):
+        """
+        Args:
+            R: estimated rotation matrix [B, 3, 3]
+            Rgt: ground-truth rotation matrix [B, 3, 3]
+        Returns:
+            R_err: rotation angular error
+        """
+        residual = torch.matmul(R.transpose(1, 2), Rgt)
+        trace = torch.diagonal(residual, dim1=-2, dim2=-1).sum(-1)
+        cosine = (trace - 1) / 2
+        R_err = torch.acos(torch.clamp(cosine, -1.0 + eps, 1.0 - eps))  # handle numerical errors and NaNs
+        return R_err.mean()         # [0, 3.14]
+
+    def _single_iter_rel_pose_loss(self, gt_trans, gt_rot, valid, pr_trans, pr_rot):
+        """Compute relative pose loss for a single iteration's predictions."""
+        if not valid.any():
+            return torch.tensor(0.0, device=gt_trans.device)
+
+        # Scale-relative translation L1 loss
+        valid_mask_t = valid.unsqueeze(-1).unsqueeze(-1).expand_as(gt_trans)
+        gt_trans_norm = gt_trans.norm(dim=-1, keepdim=True).clamp(min=1e-4)
+        trans_diff = torch.abs(pr_trans - gt_trans) / gt_trans_norm
+        trans_loss = trans_diff[valid_mask_t].mean()
+
+        # Geodesic rotation loss
+        valid_indices = valid.nonzero(as_tuple=True)
+        gt_rot_valid = gt_rot[valid_indices[0], valid_indices[1]]
+        pr_rot_valid = pr_rot[valid_indices[0], valid_indices[1]]
+        gt_rot_flat = gt_rot_valid.flatten(0, 1)
+        pr_rot_flat = pr_rot_valid.flatten(0, 1)
+        residual = torch.matmul(pr_rot_flat.transpose(-2, -1), gt_rot_flat)
+        trace = torch.diagonal(residual, dim1=-2, dim2=-1).sum(-1)
+        cosine = (trace - 1) / 2
+        rot_loss = torch.acos(torch.clamp(cosine, -1.0 + 1e-6, 1.0 - 1e-6)).mean()
+
+        rel_trans_loss_weight = getattr(self, 'rel_trans_loss_weight', 1.0)
+        return rel_trans_loss_weight * trans_loss + self.rel_rot_loss_weight * rot_loss
+
+    def compute_relative_pose_token_loss(self, gt_relative_poses, pr_relative_poses):
+        """Compute relative pose token loss.
+
+        Args:
+            gt_relative_poses: dict with 'trans' (N, K, B, 3), 'rot' (N, K, B, 3, 3), 'valid' (N, K)
+            pr_relative_poses: dict with 'trans', 'rot'
+
+        Returns:
+            relative_pose_loss: Weighted sum of translation and rotation losses
+        """
+        if gt_relative_poses is None or pr_relative_poses is None:
+            return torch.tensor(0.0), {}
+
+        gt_trans = gt_relative_poses['trans']
+        gt_rot = gt_relative_poses['rot']
+        valid = gt_relative_poses['valid']
+
+        if not valid.any():
+            return torch.tensor(0.0), {}
+
+        loss = self._single_iter_rel_pose_loss(
+            gt_trans, gt_rot, valid, pr_relative_poses['trans'], pr_relative_poses['rot']
+        )
+        return loss, {}
 
     def compute_loss(self, gts, preds, **kw):
         (
@@ -770,6 +1064,8 @@ class Regr3DPose(Criterion, MultiLoss):
             masks,
             skys,
             pose_masks,
+            gt_relative_poses,
+            pr_relative_poses,
             monitoring,
         ) = self.get_all_pts3d(gts, preds, **kw)
 
@@ -855,9 +1151,23 @@ class Regr3DPose(Criterion, MultiLoss):
         details["img_ids"] = (
             np.arange(len(ls_self)).tolist() + np.arange(len(ls_cross)).tolist()
         )
-        details["pose_loss"] = self.compute_pose_loss(gt_poses, pr_poses, pose_masks)
 
-        return Sum(*list(zip(ls, masks))), (details | monitoring)
+        # Merge monitoring into details
+        details.update(monitoring)
+
+        # Conditionally compute pose loss (added to details only)
+        if self.use_pose_loss:
+            pose_loss = self.compute_pose_loss(gt_poses, pr_poses, pose_masks)
+            details["pose_loss"] = pose_loss
+
+        # Conditionally compute relative pose token loss
+        if self.use_rel_pose_loss:
+            relative_pose_token_loss, _ = self.compute_relative_pose_token_loss(
+                gt_relative_poses, pr_relative_poses
+            )
+            details["relative_pose_token_loss"] = relative_pose_token_loss
+
+        return Sum(*list(zip(ls, masks))), details
 
 
 class Regr3DPoseBatchList(Regr3DPose):
@@ -878,9 +1188,17 @@ class Regr3DPoseBatchList(Regr3DPose):
         gt_scale=False,
         sky_loss_value=2,
         max_metric_scale=False,
+        use_pts_loss=True,
+        use_pose_loss=False,
+        use_rel_pose_loss=True,
+        rel_rot_loss_weight=10.0,
+        rel_trans_loss_weight=1.0,
+        use_align_scale=False,
     ):
         super().__init__(
-            criterion, norm_mode, gt_scale, sky_loss_value, max_metric_scale
+            criterion, norm_mode, gt_scale, sky_loss_value, max_metric_scale,
+            use_pts_loss, use_pose_loss, use_rel_pose_loss,
+            rel_rot_loss_weight, rel_trans_loss_weight, use_align_scale
         )
         self.depth_only_criterion = DepthScaleShiftInvLoss()
         self.single_view_criterion = ScaleInvLoss()
@@ -906,6 +1224,8 @@ class Regr3DPoseBatchList(Regr3DPose):
             masks,
             skys,
             pose_masks,
+            gt_relative_poses,
+            pr_relative_poses,
             monitoring,
         ) = self.get_all_pts3d(gts, preds, **kw)
 
@@ -1039,9 +1359,23 @@ class Regr3DPoseBatchList(Regr3DPose):
             np.arange(len(ls_self)).tolist() + np.arange(len(ls_cross)).tolist()
         )
         pose_masks = pose_masks * gts[i]["img_mask"]
-        details["pose_loss"] = self.compute_pose_loss(gt_poses, pr_poses, pose_masks)
 
-        return Sum(*list(zip(ls, masks))), (details | monitoring)
+        # Merge monitoring into details
+        details.update(monitoring)
+
+        # Conditionally compute pose loss (added to details only)
+        if self.use_pose_loss:
+            pose_loss = self.compute_pose_loss(gt_poses, pr_poses, pose_masks)
+            details["pose_loss"] = pose_loss
+
+        # Conditionally compute relative pose token loss
+        if self.use_rel_pose_loss:
+            relative_pose_token_loss, _ = self.compute_relative_pose_token_loss(
+                gt_relative_poses, pr_relative_poses
+            )
+            details["relative_pose_token_loss"] = relative_pose_token_loss
+
+        return Sum(*list(zip(ls, masks))), details
 
 
 class ConfLoss(MultiLoss):
@@ -1053,6 +1387,11 @@ class ConfLoss(MultiLoss):
         low  confidence means low  conf = 10  ==> conf_loss = x * 10 - alpha*log(10)
 
         alpha: hyperparameter
+
+    Loss switches:
+        use_pts_loss: Use confidence-weighted point cloud loss
+        use_pose_loss: Use absolute pose loss
+        use_rel_pose_loss: Use relative pose token loss
     """
 
     def __init__(self, pixel_loss, alpha=1):
@@ -1061,15 +1400,18 @@ class ConfLoss(MultiLoss):
         self.alpha = alpha
         self.pixel_loss = pixel_loss.with_reduction("none")
 
+        # Inherit loss switches from pixel_loss
+        self.use_pts_loss = getattr(pixel_loss, 'use_pts_loss', True)  # Default True for backward compat
+        self.use_pose_loss = getattr(pixel_loss, 'use_pose_loss', False)
+        self.use_rel_pose_loss = getattr(pixel_loss, 'use_rel_pose_loss', True)
+
     def get_name(self):
         return f"ConfLoss({self.pixel_loss})"
 
     def get_conf_log(self, x):
         return x, torch.log(x)
 
-    def compute_loss(self, gts, preds, **kw):
-        # compute per-pixel loss
-        losses_and_masks, details = self.pixel_loss(gts, preds, **kw)
+    def _weight_by_confidence(self, losses_and_masks, details, gts, preds):
         if "is_self" in details and "img_ids" in details:
             is_self = details["is_self"]
             img_ids = details["img_ids"]
@@ -1077,9 +1419,7 @@ class ConfLoss(MultiLoss):
             is_self = [False] * len(losses_and_masks)
             img_ids = list(range(len(losses_and_masks)))
 
-        # weight by confidence
         conf_losses = []
-
         for i in range(len(losses_and_masks)):
             pred = preds[img_ids[i]]
             conf_key = "conf_self" if is_self[i] else "conf"
@@ -1097,25 +1437,39 @@ class ConfLoss(MultiLoss):
             conf_loss = conf_loss.mean() if conf_loss.numel() > 0 else 0
             conf_losses.append(conf_loss)
 
+            # Log individual confidence losses
             if is_self[i]:
-                details[self.get_name() + f"_conf_loss_self/{img_ids[i]+1}"] = float(
-                    conf_loss
-                )
+                details[self.get_name() + f"_conf_loss_self/{img_ids[i]+1}"] = float(conf_loss)
             else:
-                details[self.get_name() + f"_conf_loss/{img_ids[i]+1}"] = float(
-                    conf_loss
-                )
+                details[self.get_name() + f"_conf_loss/{img_ids[i]+1}"] = float(conf_loss)
 
+        return conf_losses
+
+    def compute_loss(self, gts, preds, **kw):
+        # Compute per-pixel loss (always needed for poses and other data)
+        losses_and_masks, details = self.pixel_loss(gts, preds, **kw)
+
+        # Initialize final_loss
+        final_loss = 0.0
+
+        # Only compute confidence-weighted point cloud loss if use_pts_loss=True
+        if self.use_pts_loss:
+            conf_losses = self._weight_by_confidence(losses_and_masks, details, gts, preds)
+            pts_loss = sum(conf_losses) / len(conf_losses) * 2.0
+            final_loss = final_loss + pts_loss
+            details["pts_loss"] = pts_loss
+
+        # Clean up temporary keys
         details.pop("is_self", None)
         details.pop("img_ids", None)
 
-        final_loss = sum(conf_losses) / len(conf_losses) * 2.0
-        if "pose_loss" in details:
-            final_loss = (
-                final_loss + details["pose_loss"] #.clip(max=0.3) * 5.0
-            )  # , details
-        if "scale_loss" in details:
-            final_loss = final_loss + details["scale_loss"]
+        # Add other losses
+        if self.use_pose_loss and "pose_loss" in details:
+            final_loss = final_loss + details["pose_loss"]
+
+        if self.use_rel_pose_loss and "relative_pose_token_loss" in details:
+            final_loss = final_loss + details["relative_pose_token_loss"]
+
         return final_loss, details
 
 
@@ -1124,7 +1478,7 @@ class Regr3DPose_ScaleInv(Regr3DPose):
     if gt_scale == True: enforce the prediction to take the same scale than GT
     """
 
-    def get_all_pts3d(self, gts, preds):
+    def get_all_pts3d(self, gts, preds, **kw):
         # compute depth-normalized points
         (
             gt_pts_self,
@@ -1136,8 +1490,10 @@ class Regr3DPose_ScaleInv(Regr3DPose):
             masks,
             skys,
             pose_masks,
+            gt_relative_poses,
+            pr_relative_poses,
             monitoring,
-        ) = super().get_all_pts3d(gts, preds)
+        ) = super().get_all_pts3d(gts, preds, **kw)
 
         # measure scene scale
         _, gt_scale_self = get_group_pointcloud_center_scale(gt_pts_self, masks)
@@ -1180,5 +1536,7 @@ class Regr3DPose_ScaleInv(Regr3DPose):
             masks,
             skys,
             pose_masks,
+            gt_relative_poses,
+            pr_relative_poses,
             monitoring,
         )
