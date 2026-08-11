@@ -45,6 +45,7 @@ class SevenScenes(BaseStereoViewDataset):
         rebuttal=False,
         shuffle_seed=-1,
         kf_every=1,
+        max_frames=None,
         *args,
         ROOT,
         **kwargs,
@@ -58,6 +59,7 @@ class SevenScenes(BaseStereoViewDataset):
         self.test_id = test_id
         self.full_video = full_video
         self.kf_every = kf_every
+        self.max_frames = max_frames
         self.seq_id = seq_id
         self.rebuttal = rebuttal
         self.shuffle_seed = shuffle_seed
@@ -140,6 +142,8 @@ class SevenScenes(BaseStereoViewDataset):
             num_files = len([name for name in os.listdir(data_path) if "color" in name])
             img_idxs = [f"{i:06d}" for i in range(num_files)]
             img_idxs = img_idxs[:: self.kf_every]
+            if self.max_frames is not None:
+                img_idxs = img_idxs[: self.max_frames]
 
         # Intrinsics used in SimpleRecon
         fx, fy, cx, cy = 525, 525, 320, 240
@@ -386,6 +390,7 @@ class NRGBD(BaseStereoViewDataset):
         rebuttal=False,
         shuffle_seed=-1,
         kf_every=1,
+        max_frames=None,
         *args,
         ROOT,
         **kwargs,
@@ -400,6 +405,7 @@ class NRGBD(BaseStereoViewDataset):
         self.test_id = test_id
         self.full_video = full_video
         self.kf_every = kf_every
+        self.max_frames = max_frames
         self.seq_id = seq_id
         self.rebuttal = rebuttal
         self.shuffle_seed = shuffle_seed
@@ -470,6 +476,8 @@ class NRGBD(BaseStereoViewDataset):
             num_files = len(os.listdir(os.path.join(self.ROOT, scene_id, "images")))
             img_idxs = [f"{i}" for i in range(num_files)]
             img_idxs = img_idxs[:: min(self.kf_every, len(img_idxs) // 2)]
+            if self.max_frames is not None:
+                img_idxs = img_idxs[: self.max_frames]
 
         fx, fy, cx, cy = 554.2562584220408, 554.2562584220408, 320, 240
         intrinsics_ = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32)

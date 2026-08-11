@@ -1,3 +1,11 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# NVIDIA CORPORATION and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA CORPORATION is strictly prohibited.
+
 import os
 import sys
 from copy import deepcopy
@@ -14,7 +22,8 @@ from torch.utils.data._utils.collate import default_collate
 from tqdm import tqdm
 
 from stream3r.models.stream3r import STream3R
-from stream3r.dust3r.utils.geometry import geotrf
+from stream3r.stream_session import StreamSession
+from stream3r.dust3r.utils.geometry import geotrf, inv
 from stream3r.models.components.utils.geometry import unproject_depth_map_to_point_map
 from stream3r.models.components.utils.pose_enc import pose_encoding_to_extri_intri
 from stream3r.utils.utils import ImgDust3r2Stream3r
@@ -59,6 +68,36 @@ def get_args_parser():
     parser.add_argument("--size", type=int, default=512)
     parser.add_argument("--revisit", type=int, default=1, help="revisit times")
     parser.add_argument("--freeze", action="store_true")
+    parser.add_argument("--eval_datasets", type=str, nargs="+", default=None,
+                        help="datasets to evaluate on (default: all)")
+    # Streaming inference with rel_pose + PGO
+    parser.add_argument("--pretrained", type=str, default=None,
+                        help="Path to pretrained model weights (.pt file)")
+    parser.add_argument("--mode", type=str, default="causal", choices=["causal", "window"],
+                        help="Attention mode for streaming inference")
+    parser.add_argument("--use_rel_pose", action="store_true", default=False,
+                        help="Use streaming inference with rel_pose + PGO")
+    parser.add_argument("--kf_window", type=int, default=12)
+    parser.add_argument("--max_ref_frames", type=int, default=12)
+    parser.add_argument("--nkf_buffer_size", type=int, default=0)
+    parser.add_argument("--kf_only_cache", action="store_true", default=False)
+    parser.add_argument("--num_init_frames", type=int, default=2)
+    parser.add_argument("--pgo_sigma_rot", type=float, default=0.1)
+    parser.add_argument("--pgo_sigma_trans", type=float, default=0.3)
+    parser.add_argument("--use_global_pose_init", action="store_true", default=False)
+    parser.add_argument("--global_pose_prior_sigma", type=float, default=None)
+    parser.add_argument("--kf_every", type=int, default=None,
+                        help="Override dataset kf_every (e.g., 3 for ~300 frames)")
+    parser.add_argument("--max_frames", type=int, default=None,
+                        help="Keep at most this many frames per sequence, after "
+                             "kf_every subsampling (e.g. --kf_every 1 --max_frames 300 "
+                             "for 300 dense consecutive frames)")
+    parser.add_argument("--scene_start", type=int, default=0,
+                        help="Start scene index (for parallel split)")
+    parser.add_argument("--scene_end", type=int, default=None,
+                        help="End scene index exclusive (for parallel split)")
+    parser.add_argument("--reset_interval", type=int, default=1000000,
+                        help="Reset recurrent state every N frames (default: disabled)")
     return parser
 
 
@@ -72,33 +111,50 @@ def main(args):
     else:
         raise NotImplementedError
 
-    datasets_all = {
-        "7scenes":
-        SevenScenes(
+    eval_datasets = args.eval_datasets
+    kf_every_7s = args.kf_every if args.kf_every is not None else 200
+    kf_every_nrgbd = args.kf_every if args.kf_every is not None else 500
+    datasets_all = {}
+    if eval_datasets is None or "7scenes" in eval_datasets:
+        datasets_all["7scenes"] = SevenScenes(
             split="test",
             ROOT="./data/7scenes",
             resolution=resolution,
             num_seq=1,
             full_video=True,
-            kf_every=200,
-        ),  # 20),
-        "NRGBD":
-        NRGBD(
+            kf_every=kf_every_7s,
+            max_frames=args.max_frames,
+        )
+    if eval_datasets is None or "NRGBD" in eval_datasets:
+        datasets_all["NRGBD"] = NRGBD(
             split="test",
             ROOT="./data/neural_rgbd",
             resolution=resolution,
             num_seq=1,
             full_video=True,
-            kf_every=500,
-        ),
-    }
-
-    device = 'cuda'
-    model_name = args.model_name
+            kf_every=kf_every_nrgbd,
+            max_frames=args.max_frames,
+        )
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    model_name = args.model_name
 
-    model = STream3R.from_pretrained("yslan/STream3R").to(device)
+    if args.pretrained is not None:
+        raw = torch.load(args.pretrained, map_location=device, weights_only=False)
+        if isinstance(raw, dict) and 'state_dict' in raw and 'config' in raw:
+            checkpoint = raw['state_dict']
+            config = raw['config']
+        else:
+            checkpoint = raw
+            config = {}
+        model = STream3R(
+            use_rel_pose_prompt=config.get('use_rel_pose_prompt', args.use_rel_pose),
+            num_rel_pose_tokens=config.get('num_rel_pose_tokens', 4),
+        )
+        model.load_state_dict(checkpoint, strict=False)
+        model = model.to(device)
+    else:
+        model = STream3R.from_pretrained("yslan/STream3R").to(device)
     model.eval()
     
     os.makedirs(args.output_dir, exist_ok=True)
@@ -122,6 +178,8 @@ def main(args):
             nc2_all_med = 0
 
             idxs = list(range(len(dataset)))
+            scene_end = args.scene_end if args.scene_end is not None else len(idxs)
+            idxs = idxs[args.scene_start:scene_end]
             for data_idx in tqdm(idxs):
                 batch = default_collate([dataset[data_idx]])
                 ignore_keys = set([
@@ -147,48 +205,106 @@ def main(args):
                             view[name] = view[name].to(device,
                                                         non_blocking=True)
 
-                if model_name == "ours" or model_name == "stream3r":
-                    revisit = args.revisit
-                    update = not args.freeze
-                    if revisit > 1:
-                        # repeat input for 'revisit' times
-                        new_views = []
-                        for r in range(revisit):
-                            for i in range(len(batch)):
-                                new_view = deepcopy(batch[i])
-                                new_view["idx"] = [
-                                    (r * len(batch) + i)
-                                    for _ in range(len(batch[i]["idx"]))
-                                ]
-                                new_view["instance"] = [
-                                    str(r * len(batch) + i) for _ in range(
-                                        len(batch[i]["instance"]))
-                                ]
-                                if r > 0:
-                                    if not update:
-                                        new_view[
-                                            "update"] = torch.zeros_like(
-                                                batch[i]["update"]).bool()
-                                new_views.append(new_view)
-                        batch = new_views
+                # `model` is always a STream3R in this script (built from --pretrained
+                # or the yslan/STream3R fallback), so this inference path must run for
+                # any model_name. Keying it only on a hard-coded name made custom names
+                # (e.g. scal3r_stream3r) silently skip inference -> images_all unbound.
+                if model_name == "ours" or model_name == "stream3r" or args.pretrained is not None:
                     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
                     batch_cpu = [
                         {
                             k: v.to('cpu') if isinstance(v, torch.Tensor) else v for k, v in sample.items()
                         } for sample in batch
                     ]
-                    # move all stuffs in batch to cuda
+
                     with torch.autocast('cuda', enabled=False):
                         images = torch.cat([item['img'] for item in batch])
-                        images = ImgDust3r2Stream3r(images).to(device)
+                        images = ImgDust3r2Stream3r(images).unsqueeze(0).to(device)  # [1, S, C, H, W]
 
-                        with torch.no_grad():
-                            predictions = model(images)
-                        
-                        extrinsic, intrinsic = pose_encoding_to_extri_intri(predictions["pose_enc"], predictions["images"].shape[-2:])
+                        if args.use_rel_pose:
+                            # Streaming inference with rel_pose + PGO
+                            pgo_config = dict(
+                                kf_pgo=True,
+                                kf_window=args.kf_window,
+                                nkf_buffer_size=args.nkf_buffer_size,
+                                num_init_frames=args.num_init_frames,
+                                kf_only_cache=args.kf_only_cache,
+                                pgo_sigma_rot=args.pgo_sigma_rot,
+                                pgo_sigma_trans=args.pgo_sigma_trans,
+                            )
+                            if args.use_global_pose_init:
+                                pgo_config['use_global_pose_init'] = True
+                                if args.global_pose_prior_sigma is not None:
+                                    pgo_config['global_pose_prior_sigma'] = args.global_pose_prior_sigma
+                            session = StreamSession(model, mode=args.mode,
+                                                    use_pgo=True, pgo_config=pgo_config,
+                                                    max_ref_frames=args.max_ref_frames)
+                            reset_interval = args.reset_interval
+                            overlap_indices = []
+                            num_frames = images.shape[1]
+                            with torch.no_grad():
+                                for fi in range(num_frames):
+                                    predictions = session.forward_stream(images[:, fi:fi+1])
+                                    if (fi + 1) % reset_interval == 0 and (fi + 1) < num_frames:
+                                        session.reset_streaming_state()
+                                        predictions = session.forward_stream(images[:, fi:fi+1])
+                                        overlap_indices.append(session.frame_count - 1)
+
+                            # Get PGO-optimized poses (finalize BEFORE overlap removal)
+                            pgo_poses = session.get_pgo_poses()
+                            if overlap_indices and pgo_poses is not None:
+                                keep_mask = [True] * session.frame_count
+                                for oi in overlap_indices:
+                                    keep_mask[oi] = False
+                                pgo_poses = [p for p, keep in zip(pgo_poses, keep_mask) if keep]
+                            if pgo_poses is not None:
+                                # Build extrinsic [S, 3, 4] from c2w poses
+                                extr_list = []
+                                for c2w in pgo_poses:
+                                    if c2w.dim() == 3:
+                                        c2w = c2w.squeeze(0)
+                                    w2c = inv(c2w)
+                                    extr_list.append(w2c[:3, :4])
+                                extrinsic = torch.stack(extr_list).unsqueeze(0)  # [1, S, 3, 4]
+                            else:
+                                extrinsic, _ = pose_encoding_to_extri_intri(
+                                    predictions["pose_enc"], predictions["images"].shape[-2:])
+
+                            # Remove overlaps from predictions tensors
+                            if overlap_indices:
+                                keep_idx = [i for i, keep in enumerate(keep_mask) if keep]
+                                for k in ["pose_enc", "depth", "depth_conf", "images"]:
+                                    if k in predictions and predictions[k].shape[1] == len(keep_mask):
+                                        predictions[k] = predictions[k][:, keep_idx]
+
+                            # Get intrinsics from pose_enc (FoV)
+                            _, intrinsic = pose_encoding_to_extri_intri(
+                                predictions["pose_enc"], predictions["images"].shape[-2:])
+                        else:
+                            # Batch inference (original path)
+                            revisit = args.revisit
+                            update = not args.freeze
+                            if revisit > 1:
+                                new_views = []
+                                for r in range(revisit):
+                                    for i in range(len(batch)):
+                                        new_view = deepcopy(batch[i])
+                                        new_view["idx"] = [(r * len(batch) + i) for _ in range(len(batch[i]["idx"]))]
+                                        new_view["instance"] = [str(r * len(batch) + i) for _ in range(len(batch[i]["instance"]))]
+                                        if r > 0 and not update:
+                                            new_view["update"] = torch.zeros_like(batch[i]["update"]).bool()
+                                        new_views.append(new_view)
+                                batch = new_views
+                                batch_cpu = [{k: v.to('cpu') if isinstance(v, torch.Tensor) else v for k, v in sample.items()} for sample in batch]
+
+                            with torch.no_grad():
+                                predictions = model(images)
+                            extrinsic, intrinsic = pose_encoding_to_extri_intri(
+                                predictions["pose_enc"], predictions["images"].shape[-2:])
+
                         world_points_from_depth = unproject_depth_map_to_point_map(
-                            predictions["depth"].cpu().numpy().squeeze(0), 
-                            extrinsic.cpu().numpy().squeeze(0), 
+                            predictions["depth"].cpu().numpy().squeeze(0),
+                            extrinsic.cpu().numpy().squeeze(0),
                             intrinsic.cpu().numpy().squeeze(0)
                         )
                         world_points_from_depth = torch.from_numpy(world_points_from_depth).unsqueeze(0).to(device=device)
@@ -199,15 +315,16 @@ def main(args):
                         all_preds = []
                         for idx in range(preds.shape[1]):
                             all_preds.append(
-                            {'pts3d': preds[0][idx:idx+1].cpu(), 'conf': confs[0][idx:idx+1]}
+                                {'pts3d': preds[0][idx:idx+1].cpu(), 'conf': confs[0][idx:idx+1]}
                             )
-                        # convert preds into list
                         views = batch_cpu
                         preds = all_preds
 
-                    valid_length = len(preds) // revisit
-                    preds = preds[-valid_length:]
-                    batch = batch[-valid_length:]
+                    if not args.use_rel_pose:
+                        revisit = args.revisit
+                        valid_length = len(preds) // revisit
+                        preds = preds[-valid_length:]
+                        batch = batch[-valid_length:]
 
                     # Evaluation
                     print(

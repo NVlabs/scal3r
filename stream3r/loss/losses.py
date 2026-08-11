@@ -1,3 +1,11 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# NVIDIA CORPORATION and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA CORPORATION is strictly prohibited.
+
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 
@@ -20,7 +28,10 @@ from stream3r.dust3r.utils.geometry import (
     geotrf,
     inv,
 )
-from stream3r.loss.utils import camera_loss, point_loss, depth_loss
+from stream3r.loss.utils import (
+    camera_loss, point_loss, depth_loss,
+    _compute_relative_poses_window, compute_relative_pose_token_loss,
+)
 
 
 
@@ -141,11 +152,36 @@ class MultiLoss(nn.Module):
 
 
 class CausalLoss(MultiLoss):
-    def __init__(self, gradient_loss="grad", is_metric=True):
+    def __init__(
+        self,
+        gradient_loss="grad",
+        is_metric=True,
+        # Component loss weights (set to 0 to disable gradient contribution)
+        pts3d_loss_weight: float = 1.0,
+        depth_loss_weight: float = 1.0,
+        camera_loss_weight: float = 1.0,
+        # Relative pose loss parameters
+        use_rel_pose_loss: bool = False,
+        rel_pose_loss_weight: float = 0.1,
+        rel_rot_loss_weight: float = 10.0,
+        # CUT3R-style pts3d scale alignment
+        use_align_scale: bool = False,
+    ):
         super().__init__()
 
         self.gradient_loss = gradient_loss
         self.is_metric = is_metric
+
+        # Component loss weights
+        self.pts3d_loss_weight = pts3d_loss_weight
+        self.depth_loss_weight = depth_loss_weight
+        self.camera_loss_weight = camera_loss_weight
+
+        # Relative pose loss settings
+        self.use_rel_pose_loss = use_rel_pose_loss
+        self.rel_pose_loss_weight = rel_pose_loss_weight
+        self.rel_rot_loss_weight = rel_rot_loss_weight
+        self.use_align_scale = use_align_scale
 
     def get_name(self):
         return f"CausalLoss"
@@ -228,39 +264,79 @@ class CausalLoss(MultiLoss):
         details = {}
         self_name = type(self).__name__
 
-        gt_pts3d_global, valid_mask_global = self.get_pts3d_from_views(gts, key_word="pts3d", **kw) # B, N, H, W, C
-        gt_depth, valid_mask_depth = self.get_depth_from_views(gts, **kw) # B, N, H, W, C
         gt_extrinsics, gt_intrinsics, image_size_hw = self.get_camera_from_views(gts)
 
-        pred_pts3d_global, pred_conf_global = preds["world_points"], preds["world_points_conf"]
+        # Depth loss is always needed for scale factors (gt_pts3d_scale / pred_pts3d_scale)
+        # used by relative pose loss for translation scale alignment.
+        # When depth_loss_weight=0, we compute under no_grad to save memory.
         pred_depth, pred_depth_conf = preds["depth"], preds["depth_conf"]
+        gt_depth, valid_mask_depth = self.get_depth_from_views(gts, **kw)
+        if self.depth_loss_weight > 0:
+            loss_depth = depth_loss(pred_depth, pred_depth_conf, gt_depth, valid_mask_depth, gradient_loss=self.gradient_loss, temporal_matching_loss=False, all_mean=True, valid_range=0.98, normalize_pred=True, normalize_gt=True, normalize_using_first_view=False)
+        else:
+            with torch.no_grad():
+                loss_depth = depth_loss(pred_depth, pred_depth_conf, gt_depth, valid_mask_depth, gradient_loss=self.gradient_loss, temporal_matching_loss=False, all_mean=True, valid_range=0.98, normalize_pred=True, normalize_gt=True, normalize_using_first_view=False)
+        gt_pts3d_scale = loss_depth["gt_pts3d_scale"]
+        pred_pts3d_scale = loss_depth["pred_pts3d_scale"]
 
-        # loss for pts3d global
-        loss_pts3d_global = point_loss(pred_pts3d_global, pred_conf_global, gt_pts3d_global, valid_mask_global, gradient_loss=self.gradient_loss, temporal_matching_loss=False, all_mean=True, valid_range=0.98, normalize_pred=True, normalize_gt=True, normalize_using_first_view=False)
+        total_loss = torch.tensor(0.0, device=gt_extrinsics.device)
 
-        # loss for depth
-        loss_depth = depth_loss(pred_depth, pred_depth_conf, gt_depth, valid_mask_depth, gradient_loss=self.gradient_loss, temporal_matching_loss=False, all_mean=True, valid_range=0.98, normalize_pred=True, normalize_gt=True, normalize_using_first_view=False)
-        gt_pts3d_scale = loss_depth[f"gt_pts3d_scale"]
-        pred_pts3d_scale = loss_depth[f"pred_pts3d_scale"]
+        # pts3d loss (skip entirely when weight=0)
+        if self.pts3d_loss_weight > 0:
+            gt_pts3d_global, valid_mask_global = self.get_pts3d_from_views(gts, key_word="pts3d", **kw)
+            pred_pts3d_global, pred_conf_global = preds["world_points"], preds["world_points_conf"]
+            loss_pts3d_global = point_loss(pred_pts3d_global, pred_conf_global, gt_pts3d_global, valid_mask_global, gradient_loss=self.gradient_loss, temporal_matching_loss=False, all_mean=True, valid_range=0.98, ormalize_pred=True, normalize_gt=True, normalize_using_first_view=False)
+            pts3d_loss = loss_pts3d_global["loss_conf"] + loss_pts3d_global["loss_grad"]
+            total_loss = total_loss + self.pts3d_loss_weight * pts3d_loss
+            details[self_name + "_pts3d_loss" + "/00"] = float(pts3d_loss.detach())
+            details[self_name + "_pts3d_loss_global" + "_conf" + "/00"] = float(loss_pts3d_global["loss_conf"].detach())
+            details[self_name + "_pts3d_loss_global" + "_grad" + "/00"] = float(loss_pts3d_global["loss_grad"].detach())
 
-        # loss for camera
-        pred_pose_enc_list = preds["pose_enc_list"]
-        loss_camera = camera_loss(pred_pose_enc_list, gt_extrinsics, gt_intrinsics, image_size_hw, loss_type="l1", gt_pts3d_scale=gt_pts3d_scale, pred_pts3d_scale=pred_pts3d_scale, pose_encoding_type="relT_quaR_FoV")
+        # depth loss
+        if self.depth_loss_weight > 0:
+            depth_loss_val = loss_depth["loss_conf"] + loss_depth["loss_grad"]
+            total_loss = total_loss + self.depth_loss_weight * depth_loss_val
+            details[self_name + "_depth_loss" + "_conf" + "/00"] = float(loss_depth["loss_conf"].detach())
+            details[self_name + "_depth_loss" + "_grad" + "/00"] = float(depth_loss_val.detach())
 
-        # total loss
-        pts3d_loss = loss_pts3d_global["loss_conf"] + loss_pts3d_global["loss_grad"] + loss_depth["loss_conf"] + loss_depth["loss_grad"]
-        total_loss = pts3d_loss + loss_camera["loss_camera"]
+        # camera loss (skip entirely when weight=0)
+        if self.camera_loss_weight > 0:
+            pred_pose_enc_list = preds["pose_enc_list"]
+            loss_camera = camera_loss(pred_pose_enc_list, gt_extrinsics, gt_intrinsics, image_size_hw, loss_type="l1", gt_pts3d_scale=gt_pts3d_scale, pred_pts3d_scale=pred_pts3d_scale, pose_encoding_type="relT_quaR_FoV")
+            total_loss = total_loss + self.camera_loss_weight * loss_camera["loss_camera"]
+            details[self_name + "_camera_loss" + "_loss_camera" + "/00"] = float(loss_camera["loss_camera"].detach())
+            details[self_name + "_camera_loss" + "_loss_T" + "/00"] = float(loss_camera["loss_T"].detach())
+            details[self_name + "_camera_loss" + "_loss_R" + "/00"] = float(loss_camera["loss_R"].detach())
+            details[self_name + "_camera_loss" + "_loss_fl" + "/00"] = float(loss_camera["loss_fl"].detach())
 
-        # logs
-        details[self_name + "_pts3d_loss" + "/00"] = float(pts3d_loss.detach())
-        details[self_name + "_pts3d_loss_global" + "_conf" + "/00"] = float(loss_pts3d_global["loss_conf"].detach())
-        details[self_name + "_pts3d_loss_global" + "_grad" + "/00"] = float(loss_pts3d_global["loss_grad"].detach())
-        details[self_name + "_depth_loss" + "_conf" + "/00"] = float(loss_depth["loss_conf"].detach())
-        details[self_name + "_depth_loss" + "_grad" + "/00"] = float(loss_depth["loss_grad"].detach())
+        # CUT3R-style multi-ref relative pose loss
+        if self.use_rel_pose_loss and "rel_pose" in preds:
+            rel_pose_dict = preds["rel_pose"]
 
-        details[self_name + "_camera_loss" + "_loss_camera" + "/00"] = float(loss_camera["loss_camera"].detach())
-        details[self_name + "_camera_loss" + "_loss_T" + "/00"] = float(loss_camera["loss_T"].detach())
-        details[self_name + "_camera_loss" + "_loss_R" + "/00"] = float(loss_camera["loss_R"].detach())
-        details[self_name + "_camera_loss" + "_loss_fl" + "/00"] = float(loss_camera["loss_fl"].detach())
+            # Gather pts3d for align_points_scale (when use_align_scale=True)
+            pred_pts3d = preds.get("world_points") if self.use_align_scale else None
+            if self.use_align_scale:
+                gt_pts3d, pts3d_valid_mask = self.get_pts3d_from_views(gts, key_word="pts3d", **kw)
+            else:
+                gt_pts3d, pts3d_valid_mask = None, None
+
+            gt_relative_poses, pr_relative_poses = _compute_relative_poses_window(
+                gt_extrinsics, rel_pose_dict,
+                pred_pts3d=pred_pts3d, gt_pts3d=gt_pts3d,
+                pts3d_valid_mask=pts3d_valid_mask,
+                use_align_scale=self.use_align_scale,
+            )
+
+            loss_rel, loss_details_rel = compute_relative_pose_token_loss(
+                gt_relative_poses, pr_relative_poses,
+                rot_loss_weight=self.rel_rot_loss_weight,
+            )
+
+            if torch.is_tensor(loss_rel) and loss_rel.requires_grad:
+                total_loss = total_loss + self.rel_pose_loss_weight * loss_rel
+
+            details[self_name + "_rel_pose_loss" + "/00"] = float(loss_rel.detach()) if torch.is_tensor(loss_rel) else 0.0
+            for k, v in loss_details_rel.items():
+                details[self_name + "_" + k + "/00"] = v
 
         return total_loss, details

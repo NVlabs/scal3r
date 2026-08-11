@@ -1,3 +1,11 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# NVIDIA CORPORATION and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA CORPORATION is strictly prohibited.
+
 import PIL
 import types
 import torchvision
@@ -77,8 +85,8 @@ class BaseMultiViewDataset(EasyDataset):
 
         # more robust than [[ transform == SeqColorJitter() ]]
         if isinstance(transform, types.FunctionType) and transform.__name__ == 'SeqColorJitter':
-            transform = SeqColorJitter()
             self.is_seq_color_jitter = True
+            transform = ImgNorm  # placeholder (SeqColorJitter() called per-sample in __getitem__)
         self.transform = transform
 
         self.aug_crop = aug_crop

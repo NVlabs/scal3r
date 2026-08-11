@@ -1,3 +1,11 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# NVIDIA CORPORATION and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA CORPORATION is strictly prohibited.
+
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 #
@@ -131,6 +139,7 @@ class DPTHead(nn.Module):
         images: torch.Tensor,
         patch_start_idx: int,
         frames_chunk_size: int = 8,
+        num_rel_pose_tokens: int = 0,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
         Forward pass through the DPT head, supports processing by chunking frames.
@@ -141,6 +150,8 @@ class DPTHead(nn.Module):
                 Used to separate patch tokens from other tokens (e.g., camera or register tokens).
             frames_chunk_size (int, optional): Number of frames to process in each chunk.
                 If None or larger than S, all frames are processed at once. Default: 8.
+            num_rel_pose_tokens (int, optional): Number of rel_pose tokens at the end to exclude.
+                Default: 0.
 
         Returns:
             Tensor or Tuple[Tensor, Tensor]:
@@ -151,7 +162,7 @@ class DPTHead(nn.Module):
 
         # If frames_chunk_size is not specified or greater than S, process all frames at once
         if frames_chunk_size is None or frames_chunk_size >= S:
-            return self._forward_impl(aggregated_tokens_list, images, patch_start_idx)
+            return self._forward_impl(aggregated_tokens_list, images, patch_start_idx, num_rel_pose_tokens=num_rel_pose_tokens)
 
         # Otherwise, process frames in chunks to manage memory usage
         assert frames_chunk_size > 0
@@ -166,12 +177,14 @@ class DPTHead(nn.Module):
             # Process batch of frames
             if self.feature_only:
                 chunk_output = self._forward_impl(
-                    aggregated_tokens_list, images, patch_start_idx, frames_start_idx, frames_end_idx
+                    aggregated_tokens_list, images, patch_start_idx, frames_start_idx, frames_end_idx,
+                    num_rel_pose_tokens=num_rel_pose_tokens
                 )
                 all_preds.append(chunk_output)
             else:
                 chunk_preds, chunk_conf = self._forward_impl(
-                    aggregated_tokens_list, images, patch_start_idx, frames_start_idx, frames_end_idx
+                    aggregated_tokens_list, images, patch_start_idx, frames_start_idx, frames_end_idx,
+                    num_rel_pose_tokens=num_rel_pose_tokens
                 )
                 all_preds.append(chunk_preds)
                 all_conf.append(chunk_conf)
@@ -189,6 +202,7 @@ class DPTHead(nn.Module):
         patch_start_idx: int,
         frames_start_idx: int = None,
         frames_end_idx: int = None,
+        num_rel_pose_tokens: int = 0,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
         Implementation of the forward pass through the DPT head.
@@ -201,6 +215,7 @@ class DPTHead(nn.Module):
             patch_start_idx (int): Starting index for patch tokens.
             frames_start_idx (int, optional): Starting index for frames to process.
             frames_end_idx (int, optional): Ending index for frames to process.
+            num_rel_pose_tokens (int, optional): Number of rel_pose tokens at the end to exclude.
 
         Returns:
             Tensor or Tuple[Tensor, Tensor]: Feature maps or (predictions, confidence).
@@ -216,7 +231,11 @@ class DPTHead(nn.Module):
         dpt_idx = 0
 
         for layer_idx in self.intermediate_layer_idx:
-            x = aggregated_tokens_list[layer_idx][:, :, patch_start_idx:]
+            # Extract patch tokens only (exclude camera, register tokens at start and rel_pose tokens at end)
+            if num_rel_pose_tokens > 0:
+                x = aggregated_tokens_list[layer_idx][:, :, patch_start_idx:-num_rel_pose_tokens]
+            else:
+                x = aggregated_tokens_list[layer_idx][:, :, patch_start_idx:]
 
             # Select frames if processing a chunk
             if frames_start_idx is not None and frames_end_idx is not None:

@@ -1,3 +1,11 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# NVIDIA CORPORATION and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA CORPORATION is strictly prohibited.
+
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # This source code is licensed under the Apache License, Version 2.0
@@ -78,15 +86,23 @@ class Block(nn.Module):
 
         self.sample_drop_ratio = drop_path
 
-    def forward(self, x: Tensor, pos=None, attn_mask=None, kv_cache=None) -> Tensor:
+    def forward(self, x: Tensor, pos=None, attn_mask=None, kv_cache=None, n_query_suffix=0,
+                block_causal_S=0) -> Tensor:
+        # Only pass extra kwargs when needed to stay compatible with MemEffAttention
+        _extra_attn_kwargs = {}
+        if n_query_suffix > 0:
+            _extra_attn_kwargs['n_query_suffix'] = n_query_suffix
+        if block_causal_S > 0:
+            _extra_attn_kwargs['block_causal_S'] = block_causal_S
+
         def attn_residual_func(x: Tensor, pos=None, attn_mask=None, kv_cache=None) -> Tensor:
             if kv_cache is not None:
-                x, kv_cache = self.attn(self.norm1(x), pos=pos, attn_mask=attn_mask, kv_cache=kv_cache)
+                x, kv_cache = self.attn(self.norm1(x), pos=pos, attn_mask=attn_mask, kv_cache=kv_cache, **_extra_attn_kwargs)
                 return self.ls1(x), kv_cache
             elif attn_mask is not None:
-                return self.ls1(self.attn(self.norm1(x), pos=pos, attn_mask=attn_mask))
+                return self.ls1(self.attn(self.norm1(x), pos=pos, attn_mask=attn_mask, **_extra_attn_kwargs))
             else:
-                return self.ls1(self.attn(self.norm1(x), pos=pos))
+                return self.ls1(self.attn(self.norm1(x), pos=pos, **_extra_attn_kwargs))
 
         def ffn_residual_func(x: Tensor) -> Tensor:
             return self.ls2(self.mlp(self.norm2(x)))

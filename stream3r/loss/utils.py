@@ -1,3 +1,11 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# NVIDIA CORPORATION and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA CORPORATION is strictly prohibited.
+
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 #
@@ -527,6 +535,191 @@ def gradient_loss_multi_scale(prediction, target, mask, scales=4, gradient_loss_
 
     total = total / scales
     return total
+
+
+def _compute_relative_poses_window(
+    gt_extrinsics, rel_pose_dict,
+    pred_pts3d=None, gt_pts3d=None, pts3d_valid_mask=None,
+    use_align_scale=False,
+    eps=1e-3,
+):
+    """Compute GT + aligned pred relative poses for sliding window.
+
+    Convention: T_rel = inv(T_i) @ T_ref (same as CUT3R losses.py:440-545)
+
+    Args:
+        gt_extrinsics: [B, S, 4, 4] cam2world
+        rel_pose_dict: {'rel_trans': [B,S,K,3], 'rel_rot': [B,S,K,3,3],
+                        'ref_indices': [S,K], 'valid_mask': [B,S,K]}
+        pred_pts3d: [B, S, H, W, 3] predicted world points (for align_scale)
+        gt_pts3d: [B, S, H, W, 3] GT world points (for align_scale)
+        pts3d_valid_mask: [B, S, H, W] valid mask for pts3d (for align_scale)
+        use_align_scale: bool, use CUT3R-style pts3d alignment instead of depth-based
+        eps: numerical stability
+
+    Returns:
+        gt_relative_poses: {'trans': [N,K,B,3], 'rot': [N,K,B,3,3], 'valid': [N,K]}
+        pr_relative_poses: {'trans': [N,K,B,3], 'rot': [N,K,B,3,3]}
+    """
+    B, S = gt_extrinsics.shape[:2]
+    device = gt_extrinsics.device
+    dtype = gt_extrinsics.dtype
+
+    pr_trans = rel_pose_dict['rel_trans']   # [B, S, K, 3]
+    pr_rot = rel_pose_dict['rel_rot']       # [B, S, K, 3, 3]
+    ref_indices = rel_pose_dict['ref_indices']  # [S, K]
+    valid_mask = rel_pose_dict['valid_mask']    # [B, S, K]
+    K = pr_trans.shape[2]
+
+    if S < 2:
+        return None, None
+
+    gt_extrinsics = gt_extrinsics.float()
+    gt_R = gt_extrinsics[:, :, :3, :3]   # [B, S, 3, 3]
+    gt_t = gt_extrinsics[:, :, :3, 3]    # [B, S, 3]
+
+    # Build (i, k, ref) triples — use valid_mask to filter invalid refs
+    # (ref_indices may contain clamped values for invalid slots)
+    i_list, k_list, ref_list = [], [], []
+    for i in range(1, S):
+        for k in range(K):
+            # Check valid_mask: any batch element valid is enough
+            if valid_mask[:, i, k].any():
+                ref_idx = ref_indices[i, k].item() if torch.is_tensor(ref_indices) else ref_indices[i][k]
+                if 0 <= ref_idx < S:
+                    i_list.append(i)
+                    k_list.append(k)
+                    ref_list.append(int(ref_idx))
+
+    if len(i_list) == 0:
+        return None, None
+
+    i_idx = torch.tensor(i_list, device=device, dtype=torch.long)
+    k_idx = torch.tensor(k_list, device=device, dtype=torch.long)
+    ref_idx_t = torch.tensor(ref_list, device=device, dtype=torch.long)
+    M = i_idx.shape[0]
+
+    # Batch compute GT relative poses: R_rel = R_i^T @ R_ref, t_rel = R_i^T @ (t_ref - t_i)
+    R_i = gt_R[:, i_idx]       # [B, M, 3, 3]
+    R_ref = gt_R[:, ref_idx_t] # [B, M, 3, 3]
+    t_i = gt_t[:, i_idx]       # [B, M, 3]
+    t_ref = gt_t[:, ref_idx_t] # [B, M, 3]
+
+    R_i_T = R_i.transpose(-2, -1)  # [B, M, 3, 3]
+    BM = B * M
+    rel_rot_gt = torch.bmm(R_i_T.reshape(BM, 3, 3), R_ref.reshape(BM, 3, 3)).view(B, M, 3, 3)
+    delta_t = (t_ref - t_i).unsqueeze(-1)  # [B, M, 3, 1]
+    rel_trans_gt = torch.bmm(R_i_T.reshape(BM, 3, 3), delta_t.reshape(BM, 3, 1)).view(B, M, 3)
+
+    # Scatter into output tensors (N=S, K=K, B=B)
+    gt_rel_trans = torch.zeros(S, K, B, 3, device=device, dtype=torch.float32)
+    gt_rel_rot = torch.eye(3, device=device, dtype=torch.float32).reshape(1, 1, 1, 3, 3).expand(S, K, B, 3, 3).clone()
+    valid_out = torch.zeros(S, K, dtype=torch.bool, device=device)
+
+    for m in range(M):
+        gt_rel_trans[i_list[m], k_list[m]] = rel_trans_gt[:, m]
+        gt_rel_rot[i_list[m], k_list[m]] = rel_rot_gt[:, m]
+        valid_out[i_list[m], k_list[m]] = True
+
+    # Extract predicted relative poses → [S, K, B, ...]
+    pr_rel_trans_out = pr_trans.permute(1, 2, 0, 3).float()    # [S, K, B, 3]
+    pr_rel_rot_out = pr_rot.permute(1, 2, 0, 3, 4).float()    # [S, K, B, 3, 3]
+
+    # Apply scale alignment to translations
+    if use_align_scale and pred_pts3d is not None and gt_pts3d is not None and pts3d_valid_mask is not None:
+        # CUT3R-style: normalize pts3d by avg_dis, then robust L1 alignment
+        from stream3r.utils.alignment import align_points_scale
+
+        # avg_dis: weighted average distance from origin [B]
+        pred_dist = pred_pts3d.norm(dim=-1)  # [B, S, H, W]
+        gt_dist = gt_pts3d.norm(dim=-1)
+        valid_count = pts3d_valid_mask.sum(dim=[1, 2, 3]).clamp(min=1)
+        norm_factor_pr = ((pred_dist * pts3d_valid_mask).sum(dim=[1, 2, 3]) / valid_count).clamp(min=eps)
+        norm_factor_gt = ((gt_dist * pts3d_valid_mask).sum(dim=[1, 2, 3]) / valid_count).clamp(min=eps)
+
+        gt_pts3d_norm = gt_pts3d / norm_factor_gt.view(B, 1, 1, 1, 1)
+        pr_pts3d_norm = pred_pts3d / norm_factor_pr.view(B, 1, 1, 1, 1)
+
+        # Flatten spatial dims and align
+        S_pts = gt_pts3d.shape[1]
+        pr_flat = pr_pts3d_norm.reshape(B, -1, 3)  # [B, S*H*W, 3]
+        gt_flat = gt_pts3d_norm.reshape(B, -1, 3)
+        w_flat = pts3d_valid_mask.float().reshape(B, -1)  # [B, S*H*W]
+
+        with torch.no_grad():
+            S_align = align_points_scale(pr_flat, gt_flat, weight=w_flat)  # [B]
+            S_align[S_align <= 0] *= -1  # ensure positive
+
+        # Combined scale: S / norm_factor_pr (matches CUT3R)
+        scale = (S_align / norm_factor_pr.clamp(min=eps)).view(1, 1, B, 1)
+        pr_rel_trans_out = pr_rel_trans_out * scale
+
+        # GT: divide by norm_factor_gt
+        gt_scale = norm_factor_gt.view(1, 1, B, 1)
+        gt_rel_trans = gt_rel_trans / gt_scale.clamp(min=eps)
+    # else: no scale alignment (identity) — matches scal3r_cut3r's use_align_scale=False
+    # path (losses.py: S = ones). The depth-based fallback was a stream3r-only addition
+    # with no cut3r counterpart and is removed for systematic alignment.
+
+    return (
+        {'trans': gt_rel_trans, 'rot': gt_rel_rot, 'valid': valid_out},
+        {'trans': pr_rel_trans_out, 'rot': pr_rel_rot_out}
+    )
+
+
+def compute_relative_pose_token_loss(gt_relative_poses, pr_relative_poses, rot_loss_weight=1.0, trans_loss_weight=1.0):
+    """CUT3R-style loss (matches propose/losses.py:998-1047).
+
+    1. Scale-relative translation L1: |pred - gt| / max(|gt|, 1e-4)
+    2. Geodesic rotation loss: arccos(clamp((tr(R_pred^T @ R_gt) - 1) / 2))
+
+    Args:
+        gt_relative_poses: dict with 'trans' [N,K,B,3], 'rot' [N,K,B,3,3], 'valid' [N,K]
+        pr_relative_poses: dict with 'trans' [N,K,B,3], 'rot' [N,K,B,3,3]
+        rot_loss_weight: weight for rotation loss
+        trans_loss_weight: weight for translation loss
+
+    Returns:
+        (total_loss, loss_details_dict)
+    """
+    if gt_relative_poses is None or pr_relative_poses is None:
+        return torch.tensor(0.0), {}
+
+    gt_trans = gt_relative_poses['trans']     # (N, K, B, 3)
+    gt_rot = gt_relative_poses['rot']         # (N, K, B, 3, 3)
+    valid = gt_relative_poses['valid']        # (N, K)
+    pr_trans = pr_relative_poses['trans']
+    pr_rot = pr_relative_poses['rot']
+
+    if not valid.any():
+        return torch.tensor(0.0, device=gt_trans.device), {}
+
+    # Scale-relative translation L1 loss
+    valid_mask_t = valid.unsqueeze(-1).unsqueeze(-1).expand_as(gt_trans)
+    gt_trans_norm = gt_trans.norm(dim=-1, keepdim=True).clamp(min=1e-4)  # (N, K, B, 1)
+    trans_diff = torch.abs(pr_trans - gt_trans) / gt_trans_norm
+    trans_loss = trans_diff[valid_mask_t].mean()
+
+    # Geodesic rotation loss
+    valid_indices = valid.nonzero(as_tuple=True)
+    gt_rot_valid = gt_rot[valid_indices[0], valid_indices[1]]  # (num_valid, B, 3, 3)
+    pr_rot_valid = pr_rot[valid_indices[0], valid_indices[1]]
+    gt_rot_flat = gt_rot_valid.flatten(0, 1)   # (num_valid*B, 3, 3)
+    pr_rot_flat = pr_rot_valid.flatten(0, 1)
+    residual = torch.matmul(pr_rot_flat.transpose(-2, -1), gt_rot_flat)
+    trace = torch.diagonal(residual, dim1=-2, dim2=-1).sum(-1)
+    cosine = (trace - 1) / 2
+    rot_loss = torch.acos(torch.clamp(cosine, -1.0 + 1e-6, 1.0 - 1e-6)).mean()
+
+    trans_loss = check_and_fix_inf_nan(trans_loss, "rel_trans_loss")
+    rot_loss = check_and_fix_inf_nan(rot_loss, "rel_rot_loss")
+
+    total_loss = trans_loss_weight * trans_loss + rot_loss_weight * rot_loss
+
+    return total_loss, {
+        'loss_rel_trans': float(trans_loss.detach()),
+        'loss_rel_rot': float(rot_loss.detach()),
+    }
 
 
 def torch_quantile(
