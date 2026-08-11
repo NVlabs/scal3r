@@ -21,12 +21,16 @@
   <div align="center"></div>
 </p>
 
+<p align="center">
+  <img src="./assets/teaser.gif" alt="Scal3R teaser" width="100%">
+</p>
+
 <div align="center">
 TL;DR: Scalable online 3D reconstruction on kilometer-scale sequences, with only ~1% extra parameters on a frozen backbone trained in 8 hours on a single GPU.
 </div>
 <br>
 
-> This repository contains the **CUT3R-based** implementation of Scal3R. For the STream3R-based implementation, see `scal3r_stream3r`.
+> This repository contains the **CUT3R-based** implementation of Scal3R. For the STream3R-based implementation, see the [`scal3r_stream3r`](https://github.com/NVlabs/scal3r/tree/scal3r_stream3r) branch.
 
 ## Getting Started
 
@@ -35,7 +39,7 @@ TL;DR: Scalable online 3D reconstruction on kilometer-scale sequences, with only
 1. Clone Scal3R.
 ```bash
 git clone https://github.com/NVlabs/scal3r.git
-cd scal3r/scal3r_cut3r
+cd scal3r
 ```
 
 2. Create the environment.
