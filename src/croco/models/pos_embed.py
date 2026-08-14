@@ -1,10 +1,11 @@
-# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
 #
-# NVIDIA CORPORATION and its licensors retain all intellectual property
-# and proprietary rights in and to this software, related documentation
-# and any modifications thereto.  Any use, reproduction, disclosure or
-# distribution of this software and related documentation without an express
-# license agreement from NVIDIA CORPORATION is strictly prohibited.
+# This file is derived from CUT3R (https://github.com/CUT3R/CUT3R),
+# licensed under the Creative Commons Attribution-NonCommercial-ShareAlike
+# 4.0 International License (CC BY-NC-SA 4.0):
+# https://creativecommons.org/licenses/by-nc-sa/4.0/
+# NVIDIA's modifications in this file are released under the same
+# CC BY-NC-SA 4.0 license. See LICENSE for details.
 
 # Copyright (C) 2022-present Naver Corporation. All rights reserved.
 # Licensed under CC BY-NC-SA 4.0 (non-commercial use only).

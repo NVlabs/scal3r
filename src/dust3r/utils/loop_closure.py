@@ -1,10 +1,7 @@
-# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
 #
-# NVIDIA CORPORATION and its licensors retain all intellectual property
-# and proprietary rights in and to this software, related documentation
-# and any modifications thereto.  Any use, reproduction, disclosure or
-# distribution of this software and related documentation without an express
-# license agreement from NVIDIA CORPORATION is strictly prohibited.
+# This file is original work authored by NVIDIA, separable from CUT3R,
+# and is released under the NVIDIA License. See LICENSE_NVIDIA for details.
 
 """Online loop closure detection using DINOv2-B + SALAD (8448-dim) + FAISS.
 

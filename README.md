@@ -118,6 +118,10 @@ Please refer to the [eval.md](docs/eval.md) for more details.
 ### Training
 Please refer to the [train.md](docs/train.md) for dataset preparation ([preprocess.md](docs/preprocess.md)) and training commands.
 
+## License
+
+All [CUT3R](https://github.com/CUT3R/CUT3R) code and NVIDIA modifications of CUT3R are released under the [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/) license (see [LICENSE](LICENSE)). The separable NVIDIA-authored files `src/dust3r/utils/alignment.py`, `src/dust3r/utils/loop_closure.py`, and `src/dust3r/utils/pgo.py` are released under the NVIDIA License (see [LICENSE_NVIDIA](LICENSE_NVIDIA)). Each source file carries a header identifying its applicable license.
+
 ## Acknowledgements
 Our code is based on the following awesome repositories:
 
