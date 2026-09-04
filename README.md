@@ -17,7 +17,7 @@
     ·
     <a href="https://yulunalexliu.github.io/"><strong>Yu-Lun Liu</strong></a>
   </p>
-  <h3 align="center"><a href="https://linjohnss.github.io/scal3r/">Project Page</a> | <a href="https://linjohnss.github.io/scal3r/">Paper</a> | <a href="https://huggingface.co/nvidia/scal3r">🤗 Hugging Face</a></h3>
+  <h3 align="center"><a href="https://linjohnss.github.io/scal3r/">Project Page</a> | <a href="https://linjohnss.github.io/scal3r/">Paper</a> | <a href="https://youtu.be/IXfeymLX3iY">Video</a> | 🤗 Hugging Face (coming soon)</h3>
   <div align="center"></div>
 </p>
 
@@ -31,6 +31,9 @@ TL;DR: Scalable online 3D reconstruction on kilometer-scale sequences, with only
 <br>
 
 > This repository contains the **CUT3R-based** implementation of Scal3R. For the STream3R-based implementation, see the [`scal3r_stream3r`](https://github.com/NVlabs/scal3r/tree/scal3r_stream3r) branch.
+
+> [!NOTE]
+> The pretrained model weights will be released soon. Stay tuned!
 
 ## Getting Started
 
